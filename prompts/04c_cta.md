@@ -9,6 +9,7 @@ link mua hàng trong mô tả/bình luận, chốt lại sản phẩm Top 1 ở 
 nhất (nêu ngắn gọn 1 lý do nổi bật nhất), và nhắc nhẹ rằng nếu ngân sách hạn chế thì các mẫu Top
 dưới cũng có link đầy đủ.
 
+{{SEO_BLOCK}}
 Yêu cầu:
 - Giọng văn tự nhiên, gần gũi, KHÔNG viết như quảng cáo cứng.
 - Chèn thẻ cảm xúc trong ngoặc vuông khi phù hợp: [cười nhẹ], [nhấn mạnh].

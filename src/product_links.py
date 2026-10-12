@@ -12,6 +12,7 @@ _README_TEXT = (
     "Thả media thật lấy từ trang sản phẩm Shopee vào đây, script sẽ được viết bám theo nội dung này:\n\n"
     "- main_images/         : ảnh chính từ trang sản phẩm\n"
     "- description_images/  : ảnh trong phần mô tả sản phẩm\n"
+    "- variant_images/      : ảnh biến thể / phân loại (không bắt buộc)\n"
     "- product_video.*       : thả trực tiếp video sản phẩm vào thư mục này (không bắt buộc)\n\n"
     "Định dạng ảnh hỗ trợ: .jpg .jpeg .png .webp\n"
     "Định dạng video hỗ trợ: .mp4 .mov .webm .mkv .avi (Gemini xem trực tiếp qua Files API)\n"
@@ -62,6 +63,7 @@ def create_media_folders(selected_products: dict, out_dir: Path) -> list[Path]:
         folder = base / _product_folder_name(p)
         (folder / "main_images").mkdir(parents=True, exist_ok=True)
         (folder / "description_images").mkdir(parents=True, exist_ok=True)
+        (folder / "variant_images").mkdir(parents=True, exist_ok=True)
         readme = folder / "README.txt"
         if not readme.exists():
             readme.write_text(_README_TEXT, encoding="utf-8")
@@ -87,6 +89,7 @@ def list_all_product_images(product: dict, out_dir: Path) -> list[Path]:
     return (
         _images_in(folder / "main_images")
         + _images_in(folder / "description_images")
+        + _images_in(folder / "variant_images")   # ảnh biến thể (màu / phân loại) — ưu tiên sau cùng
         + _images_in(folder)
     )
 

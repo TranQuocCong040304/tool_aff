@@ -10,6 +10,7 @@ Ngách (JSON):
 Trích đoạn hook mở đầu kịch bản:
 {{SCRIPT_HOOK_EXCERPT}}
 
+{{TITLE_BLOCK}}{{SEO_BLOCK}}
 Nhiệm vụ: Sinh metadata tối ưu SEO + phần mở đầu cho mô tả video YouTube review Top 5 affiliate,
 giọng gần gũi tự nhiên như đang nói chuyện với người xem, có thể dùng emoji hợp lý (không lạm dụng).
 
@@ -19,6 +20,6 @@ Chỉ trả về JSON đúng theo format sau, không thêm giải thích ngoài 
   "hook_description": "đoạn mở đầu mô tả video, 3-5 câu, giọng gần gũi tự nhiên, có 1-2 emoji hợp lý, kết bằng 1 câu mời người xem để lại bình luận sản phẩm họ thích nhất (kiểu '...để lại bình luận cho mình biết với nhé! 👇')",
   "hook_label": "nhãn cực ngắn (dưới 8 từ) cho mốc 0:00 trong danh sách timestamp, tóm tắt câu hỏi/mở đầu hấp dẫn của video",
   "outro_label": "nhãn cực ngắn (dưới 8 từ) cho mốc tổng kết cuối video, kiểu 'Tổng kết: ...'",
-  "tags": ["tag1", "tag2"],
+  "tags": ["3-5 hashtag NGẮN, sát chủ đề nhất (sẽ hiện dạng #hashtag cuối mô tả — YouTube bỏ qua toàn bộ nếu quá 15)"],
   "thumbnail_text": "một câu ngắn gợi ý chữ đặt trên thumbnail"
 }

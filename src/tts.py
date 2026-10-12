@@ -13,6 +13,8 @@ text trong 1 thẻ SSML `<prosody>` duy nhất (mkssml trong communicate.py), te
 truyền vào bị escape trước khi chèn — nên KHÔNG có cách nào chèn nhiều mức
 prosody khác nhau trong 1 request qua API công khai của thư viện.
 
+Chỉ dẫn [Sound Effect: ...] được thay bằng ÂM THANH THẬT chèn vào đúng chỗ (src/sfx.py).
+
 Vì vậy: thẻ cảm xúc [cười nhẹ], [thở dài]... không còn đổi pitch/tốc độ nữa,
 mà chỉ tạo KHOẢNG LẶNG gần đúng vị trí thẻ — bằng cách cắt audio đã
 synthesize liền mạch (1 lệnh gọi cho cả block) tại ranh giới câu
@@ -29,6 +31,8 @@ from typing import List, Optional, Tuple
 
 import edge_tts
 from moviepy import AudioClip, AudioFileClip, concatenate_audioclips
+
+from .sfx import sfx_from_tag, sfx_path
 
 DEFAULT_VOICE = "vi-VN-HoaiMyNeural"  # giọng nữ. Giọng nam: vi-VN-NamMinhNeural
 
@@ -64,20 +68,37 @@ def _match_pause_ms(tag_text: str) -> int:
     return DEFAULT_PAUSE_MS
 
 
-def _strip_tags_track_pauses(raw_text_with_tags: str) -> Tuple[str, List[Tuple[int, int]]]:
-    """Bỏ thẻ cảm xúc khỏi text, trả về (text sạch để đọc, [(vị trí ký tự
-    trong text sạch, pause_ms)]) — vị trí dùng để chèn khoảng lặng gần đúng
-    chỗ thẻ từng xuất hiện."""
+_SCREEN_TAG_RE = re.compile(r"^\s*text\s*on\s*screen\s*:", re.IGNORECASE)
+
+
+def _parse_tags(raw_text_with_tags: str) -> Tuple[str, List[Tuple[int, int]], List[Tuple[int, str]]]:
+    """Bỏ mọi thẻ [...] khỏi text, trả về (text sạch để đọc,
+    [(vị trí ký tự trong text sạch, pause_ms)] cho thẻ cảm xúc,
+    [(vị trí ký tự, tên SFX)] cho chỉ dẫn [Sound Effect: ...] — chèn âm thanh thật, xem src/sfx.py).
+    [Text on screen: ...] là chỉ dẫn dựng video -> bỏ hẳn, không ngắt giọng."""
     clean_parts: List[str] = []
     pauses: List[Tuple[int, int]] = []
+    sfx: List[Tuple[int, str]] = []
     last_end = 0
+    lead = len(raw_text_with_tags) - len(raw_text_with_tags.lstrip())   # text sạch bị strip() đầu
     for m in _TAG_RE.finditer(raw_text_with_tags):
         clean_parts.append(raw_text_with_tags[last_end:m.start()])
-        char_pos = sum(len(p) for p in clean_parts)
-        pauses.append((char_pos, _match_pause_ms(m.group(1))))
+        char_pos = max(0, sum(len(p) for p in clean_parts) - lead)
+        inner = m.group(1)
+        key = sfx_from_tag(inner)
+        if key:
+            sfx.append((char_pos, key))
+        elif not _SCREEN_TAG_RE.match(inner):
+            pauses.append((char_pos, _match_pause_ms(inner)))
         last_end = m.end()
     clean_parts.append(raw_text_with_tags[last_end:])
     clean_text = "".join(clean_parts).strip()
+    return clean_text, pauses, sfx
+
+
+def _strip_tags_track_pauses(raw_text_with_tags: str) -> Tuple[str, List[Tuple[int, int]]]:
+    """(text sạch, khoảng lặng) — giữ cho code cũ; SFX xem _parse_tags."""
+    clean_text, pauses, _ = _parse_tags(raw_text_with_tags)
     return clean_text, pauses
 
 
@@ -146,6 +167,28 @@ def _synthesize_block_by_sentence(
     return sentences
 
 
+def _sentence_starts(clean_text: str, sentences: List[dict]) -> List[int]:
+    """Vị trí ký tự bắt đầu của từng câu (edge-tts SentenceBoundary) trong text sạch — tìm tuần tự theo
+    ~12 ký tự đầu của câu; không thấy thì ước lượng bằng độ dài cộng dồn."""
+    norm = lambda t: re.sub(r"\s+", " ", t)
+    hay = norm(clean_text)
+    # ánh xạ vị trí trong chuỗi đã gộp khoảng trắng -> vị trí trong clean_text
+    pos_map, j = [], 0
+    for i, ch in enumerate(clean_text):
+        if ch.isspace() and pos_map and clean_text[i - 1].isspace():
+            continue
+        pos_map.append(i)
+    out, cur = [], 0
+    for s in sentences:
+        needle = norm(s.get("text", "")).strip()[:12]
+        k = hay.find(needle, cur) if needle else -1
+        if k < 0:
+            k = min(cur, len(hay))
+        out.append(pos_map[k] if k < len(pos_map) else len(clean_text))
+        cur = k + max(len(needle), 1)
+    return out
+
+
 def _sentence_index_for_char(sentences: List[dict], char_pos: int) -> int:
     """Câu nào (theo thứ tự) chứa gần đúng vị trí ký tự char_pos — xấp xỉ
     bằng độ dài cộng dồn, đủ dùng để chèn khoảng lặng gần đúng chỗ."""
@@ -181,13 +224,19 @@ def synthesize_beats(
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     audio_segments = []  # clip đưa vào concatenate_audioclips cuối cùng
+    sfx_clips = {}  # tên SFX -> AudioFileClip (dùng lại, đóng ở cuối)
+
+    def _sfx(key: str):
+        if key not in sfx_clips:
+            sfx_clips[key] = AudioFileClip(str(sfx_path(key)))
+        return sfx_clips[key]
     block_audios = []  # AudioFileClip gốc của từng block — phải sống tới lúc export xong
     beats = []
     cursor = 0.0
     block_idx = 0
     try:
         for block in blocks:
-            clean_text, pauses = _strip_tags_track_pauses(block.get("text_with_tags", ""))
+            clean_text, pauses, sfx_events = _parse_tags(block.get("text_with_tags", ""))
             if not clean_text.strip():
                 continue
 
@@ -216,8 +265,18 @@ def synthesize_beats(
             for char_pos, pause_ms in pauses:
                 idx = _sentence_index_for_char(sentences, char_pos)
                 pause_after[idx] = max(pause_after[idx], pause_ms)
+            # Hiệu ứng âm thanh: phát NGAY TRƯỚC câu đầu tiên bắt đầu sau vị trí thẻ (thẻ cuối block -> sau câu cuối).
+            starts = _sentence_starts(clean_text, sentences)
+            sfx_before: List[List[str]] = [[] for _ in range(len(sentences) + 1)]
+            for char_pos, key in sfx_events:
+                idx = next((j for j, st in enumerate(starts) if st >= char_pos), len(sentences))
+                sfx_before[idx].append(key)
 
             for i, s in enumerate(sentences):
+                for key in sfx_before[i]:
+                    clip = _sfx(key)
+                    audio_segments.append(clip)
+                    cursor += clip.duration
                 start = max(0.0, min(s["start"], block_audio.duration))
                 end = max(start, min(s["end"], block_audio.duration))
                 if end <= start:
@@ -234,11 +293,16 @@ def synthesize_beats(
                 )
                 cursor += sub.duration
 
-                if pause_after[i] > 0:
+                if pause_after[i] > 0 and not sfx_before[i + 1]:   # có hiệu ứng ngay sau thì khỏi chèn lặng
                     pause_s = pause_after[i] / 1000.0
                     silence = AudioClip(lambda t: 0, duration=pause_s, fps=24000)
                     audio_segments.append(silence)
                     cursor += pause_s
+
+            for key in sfx_before[len(sentences)]:
+                clip = _sfx(key)
+                audio_segments.append(clip)
+                cursor += clip.duration
 
         if not audio_segments:
             raise ValueError("Không có mảnh text nào để sinh audio (toàn bộ block rỗng).")
@@ -253,7 +317,7 @@ def synthesize_beats(
                 c.close()
             except Exception:
                 pass
-        for c in block_audios:
+        for c in list(block_audios) + list(sfx_clips.values()):
             try:
                 c.close()
             except Exception:
@@ -292,6 +356,9 @@ def synthesize_gemini(
     src/media_step.py). Model đọc trực tiếp thẻ cảm xúc [hào hứng]... như chỉ
     dẫn phong cách thật (không strip/chuyển thành khoảng lặng như edge-tts) —
     nhưng KHÔNG trả về timing từng câu, nên trả về ĐÚNG 1 beat cho cả đoạn."""
+    # Gemini TTS đọc thẻ như chỉ dẫn giọng — bỏ chỉ dẫn hiệu ứng / chữ trên màn hình để nó không đọc thành lời.
+    text_with_tags = re.sub(r"\[\s*(?:sound\s*effect|sfx|text\s*on\s*screen)\s*:[^\]]*\]", "", text_with_tags,
+                            flags=re.IGNORECASE)
     pcm = gemini_client.generate_speech(text_with_tags, voice_name=voice_name)
     if not pcm:
         raise RuntimeError("Gemini TTS trả về audio rỗng.")

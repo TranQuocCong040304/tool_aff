@@ -4,9 +4,12 @@ CAM, IN ĐẬM lên trên phụ đề thường, đúng lúc người dẫn nói
 Rối Tóc ZeroTangle", "Phát Minh Vĩ Đại", "Giá Xoay Kép 200 Vòng/Phút".
 
 Cho danh sách câu thoại theo ĐÚNG thứ tự dưới đây, với MỖI câu hãy viết 1 cụm từ
-nhấn mạnh kiểu trên: 2-5 từ, tiếng Việt có dấu, Viết Hoa Chữ Cái Đầu Mỗi Từ, không
-chấm câu, KHÔNG lặp lại nguyên văn câu gốc mà phải rút gọn/diễn đạt lại cho ấn
-tượng, gãy gọn. Nếu câu chỉ là lời chuyển ý/chào hỏi chung chung không có ý chính
+nhấn mạnh kiểu trên: 2-6 từ, TỐI ĐA 26 ký tự (để vừa 1 dòng, không tràn màn hình),
+tiếng Việt có dấu, không chấm câu, KHÔNG lặp lại nguyên văn câu gốc mà phải rút
+gọn/diễn đạt lại cho ấn tượng, gãy gọn. Khi câu có con số / thông số, viết dạng
+"Ý chính · chi tiết" (vd "Nhỏ gọn · 40×35 mm", "1.045.000đ · BH 6 tháng") — phần
+trước dấu " · " sẽ tô màu nổi bật. CHỈ dùng thông tin có trong chính câu đó, không
+thêm số liệu, không phóng đại (không "tốt nhất", "số 1" nếu câu không nói vậy). Nếu câu chỉ là lời chuyển ý/chào hỏi chung chung không có ý chính
 nào đáng nhấn mạnh, trả về chuỗi rỗng "" cho câu đó.
 
 Danh sách câu (JSON, giữ nguyên thứ tự):

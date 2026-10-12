@@ -8,6 +8,7 @@ phẩm (04b_product_segment) vẫn dùng GeminiClient, xem src/pipeline.py.
 """
 import json
 import os
+import re
 import time
 
 import groq
@@ -90,13 +91,30 @@ class GroqClient:
         # hạn token/phút (free tier 8000). Để mặc định thì prompt lọc sản phẩm
         # bị 413 dù output thật chỉ ~2000 token → đặt trần rõ ràng.
         kwargs["max_completion_tokens"] = int(os.environ.get("GROQ_MAX_COMPLETION_TOKENS", "3000"))
-        response = self._call_with_retry(
-            lambda: self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                **kwargs,
-            )
-        )
+        while True:
+            try:
+                response = self._call_with_retry(
+                    lambda: self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        **kwargs,
+                    )
+                )
+                break
+            except LLMServerError as e:
+                # Groq tính prompt + max_completion_tokens vào giới hạn token/phút.
+                # Đã gặp thật: "Limit 8000, Requested 8151" — chỉ vượt 151 token.
+                # Khi vượt ít, giảm trần output đúng phần vượt (+ dư 300) rồi gọi
+                # lại, miễn trần mới vẫn đủ chỗ cho câu trả lời (>= 1500 token).
+                m = re.search(r"Limit (\d+), Requested (\d+)", str(e))
+                if not m:
+                    raise
+                over = int(m.group(2)) - int(m.group(1))
+                reduced = kwargs["max_completion_tokens"] - over - 300
+                if reduced < 1500:
+                    raise
+                print(f"  [413] Vượt {over} token/phút — giảm trần output còn {reduced} token rồi gọi lại...")
+                kwargs["max_completion_tokens"] = reduced
         choice = response.choices[0]
         if not choice.message.content and choice.finish_reason == "length":
             raise LLMServerError(

@@ -13,6 +13,7 @@ class Product:
     discount: Optional[str] = None
     position: Optional[int] = None
     is_tagged_affiliate_link: bool = True
+    reviews: Optional[int] = None          # số lượt đánh giá (nếu file JSON có)
 
     def to_dict(self) -> dict:
         return {
@@ -24,4 +25,5 @@ class Product:
             "rating": self.rating,
             "discount": self.discount,
             "position": self.position,
+            "reviews": self.reviews,
         }

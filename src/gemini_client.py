@@ -2,6 +2,7 @@
 thuần, và sinh text có kèm ảnh/video (multimodal) để viết script bám theo
 ảnh/video thật của sản phẩm.
 """
+import io
 import json
 import mimetypes
 import os
@@ -45,9 +46,9 @@ class GeminiClient:
         self.client = genai.Client(api_key=api_key)
         self.model_name = model or os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
-    def _call_with_retry(self, fn):
+    def _call_with_retry(self, fn, retries: int = _RATE_LIMIT_RETRIES):
         last_error = None
-        for attempt in range(1, _RATE_LIMIT_RETRIES + 1):
+        for attempt in range(1, retries + 1):
             try:
                 return fn()
             except errors.ClientError as e:
@@ -69,13 +70,13 @@ class GeminiClient:
                         f"Chi tiết: {e}"
                     ) from e
                 last_error = e
-                if attempt < _RATE_LIMIT_RETRIES:
+                if attempt < retries:
                     print(f"  [rate limit] Vượt giới hạn request/phút, chờ {_RATE_LIMIT_BACKOFF:.0f}s rồi thử lại...")
                     time.sleep(_RATE_LIMIT_BACKOFF)
             except errors.ServerError as e:
                 # 503 UNAVAILABLE ("high demand") — lỗi tạm thời phía Google, không phải quota.
                 last_error = e
-                if attempt < _RATE_LIMIT_RETRIES:
+                if attempt < retries:
                     print(f"  [server] Gemini đang quá tải (503), chờ {_RATE_LIMIT_BACKOFF:.0f}s rồi thử lại...")
                     time.sleep(_RATE_LIMIT_BACKOFF)
 
@@ -85,13 +86,13 @@ class GeminiClient:
         # nguyên bản, không phải LLMQuotaExceededError).
         if isinstance(last_error, errors.ServerError):
             raise LLMServerError(
-                f"Gemini server đang quá tải (503) — đã thử lại {_RATE_LIMIT_RETRIES} lần vẫn lỗi. "
+                f"Gemini server đang quá tải (503) — đã thử lại {retries} lần vẫn lỗi. "
                 "Đây là lỗi TẠM THỜI phía Google (không phải hết quota) — đợi vài phút rồi chạy lại "
                 "đúng lệnh cũ, tiến độ đã sinh được sẽ không mất. "
                 f"Chi tiết: {last_error}"
             ) from last_error
         raise LLMServerError(
-            f"Gemini vượt giới hạn request/phút quá lâu — đã thử lại {_RATE_LIMIT_RETRIES} lần vẫn lỗi. "
+            f"Gemini vượt giới hạn request/phút quá lâu — đã thử lại {retries} lần vẫn lỗi. "
             f"Đợi 1-2 phút rồi chạy lại đúng lệnh cũ. Chi tiết: {last_error}"
         ) from last_error
 
@@ -127,26 +128,82 @@ class GeminiClient:
 
         return types.Part.from_uri(file_uri=uploaded.uri, mime_type=uploaded.mime_type)
 
+    # ------------------------------------------------------------ viết nhanh --
+    # Viết lời bình không cần suy luận sâu: tắt / giảm "thinking" -> mỗi request nhanh hơn rõ, nội dung không đổi
+    # (prompt, dữ liệu, quy tắc giữ nguyên). Model không hỗ trợ cấu hình này -> tự quay về gọi bình thường.
+    _thinking_ok = True
+
+    def _fast_config(self, model: str) -> Optional[types.GenerateContentConfig]:
+        if not self._thinking_ok or os.environ.get("GEMINI_FAST_WRITE", "1") == "0":
+            return None
+        m = model.lower()
+        if "gemini-2.5" in m:
+            tc = types.ThinkingConfig(thinking_budget=128 if "pro" in m else 0)
+        elif "gemini-1" in m or "gemini-2.0" in m:
+            return None
+        else:
+            tc = types.ThinkingConfig(thinking_level=os.environ.get("GEMINI_THINKING_LEVEL", "low"))
+        return types.GenerateContentConfig(thinking_config=tc)
+
+    @staticmethod
+    def _image_bytes(img_path: Path) -> tuple[bytes, str]:
+        """Ảnh > 1024px thu nhỏ trước khi gửi (gửi nhanh hơn, Gemini vẫn đọc đủ chi tiết)."""
+        raw = img_path.read_bytes()
+        mime_type = mimetypes.guess_type(str(img_path))[0] or "image/jpeg"
+        try:
+            from PIL import Image
+            with Image.open(io.BytesIO(raw)) as im:
+                if max(im.size) <= 1024 and len(raw) <= 400_000:
+                    return raw, mime_type
+                im = im.convert("RGB")
+                im.thumbnail((1024, 1024))
+                buf = io.BytesIO()
+                im.save(buf, format="JPEG", quality=85)
+                return buf.getvalue(), "image/jpeg"
+        except Exception:
+            return raw, mime_type
+
     def generate_text(
         self,
         prompt: str,
         images: Optional[Sequence[Union[str, Path]]] = None,
         video: Optional[Union[str, Path]] = None,
+        fast: bool = False,
     ) -> str:
         """images/video: đính kèm ảnh/video thật — Gemini nhìn trực tiếp nội dung này
         khi viết text (dùng để viết script bám theo ảnh/video sản phẩm thật). Ảnh gửi
-        inline; video upload qua Gemini Files API (video có thể lớn hơn giới hạn inline)."""
+        inline; video upload qua Gemini Files API (video có thể lớn hơn giới hạn inline).
+        fast=True: giảm "thinking" + quá tải (503) thì chuyển sang GEMINI_FALLBACK_MODEL (nếu đặt trong .env)."""
         parts = [types.Part.from_text(text=prompt)]
         for img_path in images or []:
-            img_path = Path(img_path)
-            mime_type = mimetypes.guess_type(str(img_path))[0] or "image/jpeg"
-            parts.append(types.Part.from_bytes(data=img_path.read_bytes(), mime_type=mime_type))
+            data, mime_type = self._image_bytes(Path(img_path))
+            parts.append(types.Part.from_bytes(data=data, mime_type=mime_type))
         if video:
             parts.append(self._upload_video_part(video))
 
-        response = self._call_with_retry(
-            lambda: self.client.models.generate_content(model=self.model_name, contents=parts)
-        )
+        def call(model: str, retries: int = _RATE_LIMIT_RETRIES):
+            cfg = self._fast_config(model) if fast else None
+            try:
+                return self._call_with_retry(
+                    lambda: self.client.models.generate_content(model=model, contents=parts, config=cfg), retries)
+            except LLMServerError as e:
+                if cfg is not None and "thinking" in str(e).lower():
+                    GeminiClient._thinking_ok = False   # model không nhận cấu hình thinking -> gọi bình thường
+                    return self._call_with_retry(
+                        lambda: self.client.models.generate_content(model=model, contents=parts), retries)
+                raise
+
+        fallback = os.environ.get("GEMINI_FALLBACK_MODEL", "").strip()
+        if fast and fallback and fallback != self.model_name:
+            try:
+                response = call(self.model_name, retries=2)
+            except LLMServerError as e:
+                if "503" not in str(e) and "quá tải" not in str(e):
+                    raise
+                print(f"  [server] {self.model_name} quá tải — chuyển sang model dự phòng {fallback}...")
+                response = call(fallback)
+        else:
+            response = call(self.model_name)
         return response.text
 
     def generate_speech(self, text_with_tags: str, voice_name: str = "Kore", model: Optional[str] = None) -> bytes:

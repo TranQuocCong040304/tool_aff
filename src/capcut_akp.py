@@ -31,6 +31,19 @@ SUBTITLE_STYLES = list(akp_subtitle.STYLE_PRESETS)
 
 DEFAULT_OPTIONS = {
     **akp_engine.PRO_DEFAULTS,
+    # Phong cách đã duyệt trên project mẫu 1010 (YouTube 16:9, video chủ yếu là ảnh): keyframe NGẪU NHIÊN
+    # (zoom vào / zoom ra / trượt trái-phải / Ken Burns luân phiên, có ease) + nền là chính ảnh phóng to, mờ mạnh,
+    # độ đậm 40%, zoom rất chậm — nền không giành mắt người xem.
+    "style": "Ngẫu nhiên Zoom & Pan",
+    "zoom": 1.10,
+    "pan": 0.08,
+    # CHỈ 2 keyframe (đầu + cuối) mỗi thuộc tính: CapCut nội suy đều giữa 2 điểm -> trượt liền mạch.
+    # Nhiều điểm (11) làm ảnh khựng khựng ở từng điểm khi xem lại.
+    "points": 2,
+    "bg_alpha": 0.40,
+    "bg_blur": "Mạnh",
+    "bg_zoom": 1.05,
+    "video_zoom": 1.04,
     "keyword_subs": False,
     "sub_style": SUBTITLE_STYLES[0],
     "sub_max_words": 3,

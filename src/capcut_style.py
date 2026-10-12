@@ -34,7 +34,10 @@ DEFAULT_KEN_BURNS = {
 
 
 def list_styles() -> list:
-    return sorted(p.stem for p in STYLES_DIR.glob("*.json")) if STYLES_DIR.exists() else []
+    """Bộ phong cách, MỚI LƯU NHẤT lên đầu (ô chọn mặc định lấy bộ vừa học)."""
+    if not STYLES_DIR.exists():
+        return []
+    return [p.stem for p in sorted(STYLES_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)]
 
 
 def load_style(name: str) -> dict:
@@ -65,12 +68,25 @@ def _text_sample(seg: dict, material: dict, index: dict) -> dict:
     styles = json.loads(material["content"]).get("styles") or [{}]
     effects = [_strip_ids(index[r][1]) for r in seg.get("extra_material_refs", [])
                if r in index and index[r][0] == "effects"]
-    return {
+    sample = {
         "material": _strip_ids(material),
         "style": {k: v for k, v in styles[0].items() if k != "range"},
         "clip": copy.deepcopy(seg["clip"]),
         "effects": effects,
     }
+    # Chữ 2 màu (vd "Nhỏ gọn" vàng + " · 40×35 mm" trắng): giữ kiểu của phần sau.
+    if len(styles) > 1:
+        sample["accent_style"] = {k: v for k, v in styles[1].items() if k != "range"}
+    # Hiệu ứng bật (keyframe phóng to ngắn lúc chữ xuất hiện).
+    pop = {}
+    for g in seg.get("common_keyframes") or []:
+        kl = g.get("keyframe_list") or []
+        if g.get("property_type") in ("KFTypeScaleX", "KFTypeScaleY") and 2 <= len(kl) <= 4 \
+                and int(kl[-1].get("time_offset", 0)) <= 1_000_000:
+            pop[g["property_type"]] = [[int(k["time_offset"]), float(k["values"][0])] for k in kl]
+    if pop:
+        sample["pop"] = pop
+    return sample
 
 
 def _caption_sample(seg: dict, template: dict, index: dict) -> Optional[dict]:
@@ -117,6 +133,9 @@ def extract_style(content: dict, name: str, description: str = "", source: str =
     style = {"name": name, "description": description, "source_draft": source,
              "background_layer": {"enabled": False}, "ken_burns": dict(DEFAULT_KEN_BURNS),
              "transitions": {"enabled": False, "pool": []}, "texts": {}}
+    cv = content.get("canvas_config") or {}
+    if cv.get("width") and cv.get("height"):
+        style["canvas"] = {"width": int(cv["width"]), "height": int(cv["height"])}
 
     video_tracks = [t for t in content["tracks"] if t["type"] == "video" and t["segments"]]
     if len(video_tracks) >= 2:
@@ -126,14 +145,38 @@ def extract_style(content: dict, name: str, description: str = "", source: str =
     main = video_tracks[-1] if video_tracks else None
     if main:
         style["ken_burns"]["enabled"] = any(s.get("common_keyframes") for s in main["segments"])
-        pool, seen = [], set()
+        pool, seen, uses = [], set(), {}
         for seg in main["segments"]:
             for r in seg.get("extra_material_refs", []):
                 kind, mat = index.get(r, (None, None))
-                if kind == "transitions" and mat["name"] not in seen:
-                    seen.add(mat["name"])
-                    pool.append(_strip_ids(mat))
+                if kind == "transitions":
+                    uses[mat["name"]] = uses.get(mat["name"], 0) + 1
+                    if mat["name"] not in seen:
+                        seen.add(mat["name"])
+                        pool.append(_strip_ids(mat))
         style["transitions"] = {"enabled": bool(pool), "pool": pool}
+        if len(uses) >= 2:
+            # Kiểu dùng NHIỀU nhất = chuyển cảnh thường; kiểu ít hơn = điểm nhấn (đổi sản phẩm, vào/ra video).
+            ranked = sorted(uses, key=uses.get, reverse=True)
+            style["transitions"].update({"soft": ranked[0], "accent": ranked[1]})
+        # Chuyển động ảnh (để Auto Keyframe Pro làm giống y): số keyframe, mức zoom, độ đậm lớp nền.
+        videos = {m["id"]: m for m in content["materials"].get("videos", [])}
+        points, ratios = 0, []
+        for seg in main["segments"]:
+            if videos.get(seg.get("material_id"), {}).get("type") != "photo":
+                continue
+            for g in seg.get("common_keyframes") or []:
+                vals = [k["values"][0] for k in g.get("keyframe_list") or [] if k.get("values")]
+                points = max(points, len(vals))
+                if g.get("property_type") == "KFTypeScaleX" and vals and min(vals) > 0:
+                    ratios.append(max(vals) / min(vals))
+        if points:
+            akp = {"points": points}
+            if ratios:
+                akp["zoom"] = round(min(max(sorted(ratios)[len(ratios) // 2], 1.02), 1.30), 2)
+            if style["background_layer"].get("enabled"):
+                akp["bg_alpha"] = round(float(style["background_layer"]["alpha"]), 2)
+            style["akp"] = akp
 
     remaining = []
     for track in content["tracks"]:
@@ -169,6 +212,9 @@ def extract_style(content: dict, name: str, description: str = "", source: str =
         elif len(track["segments"]) <= 10 and "intro" not in style["texts"]:
             style["texts"]["intro"] = sample
         elif "highlight" not in style["texts"]:
+            # Chữ nhấn mạnh hiện tối đa bao lâu (bản mẫu tự tắt sớm để màn hình không rối).
+            durs = sorted(s["target_timerange"]["duration"] for s in track["segments"])
+            sample["max_seconds"] = round(durs[-1] / 1_000_000 + 0.1, 1)
             style["texts"]["highlight"] = sample
     # Vai trò người dùng đã xoá khỏi project mẫu -> tắt luôn khi xuất.
     for role in ("subtitle", "highlight", "top_badge", "price_badge", "intro"):
@@ -179,11 +225,24 @@ def extract_style(content: dict, name: str, description: str = "", source: str =
 def describe_style(style: dict) -> list:
     """Tóm tắt dễ đọc để hiện trên UI."""
     lines = []
+    cv = style.get("canvas")
+    if cv:
+        lines.append(f"Khung hình: {cv['width']}x{cv['height']} ({'ngang 16:9' if cv['width'] > cv['height'] else 'dọc'})")
     bg = style.get("background_layer", {})
     lines.append(f"Lớp nền phóng to: {'có, x%.2f, độ mờ %d%%' % (bg['scale'], round(bg['alpha'] * 100)) if bg.get('enabled') else 'không'}")
     lines.append(f"Zoom + trượt ảnh: {'có' if style.get('ken_burns', {}).get('enabled') else 'không'}")
     pool = style.get("transitions", {}).get("pool", [])
-    lines.append(f"Chuyển cảnh: {', '.join(t['name'] for t in pool) if pool else 'không'}")
+    tr = style.get("transitions", {})
+    if tr.get("soft"):
+        dur = {t["name"]: t.get("duration", 0) / 1_000_000 for t in pool}
+        lines.append(f"Chuyển cảnh: {tr['soft']} ({dur.get(tr['soft'], 0):.1f}s) cho cảnh thường, "
+                     f"{tr['accent']} ({dur.get(tr['accent'], 0):.1f}s) khi đổi sản phẩm / vào-ra video")
+    else:
+        lines.append(f"Chuyển cảnh: {', '.join(t['name'] for t in pool) if pool else 'không'}")
+    akp = style.get("akp")
+    if akp:
+        lines.append(f"Auto Keyframe Pro: {akp['points']} keyframe/ảnh, zoom x{akp.get('zoom', '?')}, "
+                     f"lớp nền đậm {round(akp.get('bg_alpha', 0) * 100)}%")
     names = {"subtitle": "Phụ đề", "highlight": "Chữ nhấn mạnh", "top_badge": "Badge TOP",
              "price_badge": "Badge giá", "intro": "Card lý do chọn"}
     for role, label in names.items():
@@ -194,5 +253,8 @@ def describe_style(style: dict) -> list:
         st = sample.get("style", {})
         fx = ", ".join(e.get("name", "") for e in sample.get("effects", [])) or "không"
         pos = sample.get("clip", {}).get("transform", {})
-        lines.append(f"{label}: cỡ {st.get('size')}, vị trí ({pos.get('x', 0):.2f}, {pos.get('y', 0):.2f}), hiệu ứng {fx}")
+        extra = (", 2 màu" if sample.get("accent_style") else "") + (", bật nhẹ khi hiện" if sample.get("pop") else "") \
+            + (f", tối đa {sample['max_seconds']}s" if sample.get("max_seconds") else "")
+        lines.append(f"{label}: cỡ {st.get('size')}, vị trí ({pos.get('x', 0):.2f}, {pos.get('y', 0):.2f}), "
+                     f"hiệu ứng {fx}{extra}")
     return lines

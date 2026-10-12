@@ -21,6 +21,7 @@ Các track:
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -35,6 +36,7 @@ from PIL import Image
 from .capcut_style import DEFAULT_KEN_BURNS
 from .product_links import find_product_media, list_all_product_images
 from .utils import format_price, match_by_name, slugify
+from .visual_plan import plan_montage, plan_product
 from .video_assembly import _VIDEO_BEAT_MIN_DURATION, _build_beats, _collect_montage_images, _pick_fallback_image
 
 _TEMPLATES_PATH = Path(__file__).parent / "capcut_templates" / "capcut_templates.json"
@@ -48,6 +50,8 @@ HIGHLIGHT_STYLE = {"size": 10.0, "y": -0.50, "color": (1.0, 0.80, 0.16), "stroke
 INTRO_STYLE = {"size": 6.0, "y": 0.62, "color": (1.0, 1.0, 1.0), "bg": "#2f6f5e"}
 TOP_BADGE_STYLE = {"size": 9.0, "x": -0.82, "y": 0.84, "color": (1.0, 1.0, 1.0), "bg": "#e6a35f"}
 PRICE_BADGE_STYLE = {"size": 9.0, "x": 0.80, "y": 0.84, "color": (1.0, 1.0, 1.0), "bg": "#2f6f5e"}
+SCREEN_STYLE = {"size": 11.0, "y": 0.42, "color": (1.0, 1.0, 1.0), "stroke": (0.0, 0.0, 0.0)}
+SCREEN_SECONDS = 4.0   # dòng [Text on screen] hiện ~4 giây
 
 
 def default_drafts_root() -> Optional[Path]:
@@ -220,8 +224,15 @@ class _DraftBuilder:
         length = len(text.encode("utf-16-le")) // 2
         mat = copy.deepcopy(sample["material"])
         mat["id"] = _new_id()
-        mat["content"] = json.dumps({"text": text, "styles": [dict(sample["style"], range=[0, length])]},
-                                    ensure_ascii=False)
+        styles = [dict(sample["style"], range=[0, length])]
+        accent = sample.get("accent_style")
+        if accent:
+            # Chữ 2 màu như bản mẫu: phần trước " · " / ":" theo kiểu 1, phần sau theo kiểu 2.
+            m = re.search(r"\s[·•|\-–]\s|:\s", text)
+            if m:
+                cut = len(text[:m.start() + (1 if text[m.start()] == ":" else 0)].encode("utf-16-le")) // 2
+                styles = [dict(sample["style"], range=[0, cut]), dict(accent, range=[cut, length])]
+        mat["content"] = json.dumps({"text": text, "styles": styles}, ensure_ascii=False)
         self.materials["texts"].append(mat)
 
         refs = self._extras(["material_animations"])
@@ -238,6 +249,16 @@ class _DraftBuilder:
             "render_index": self._text_render_index, "keyframe_refs": [], "extra_material_refs": refs,
         })
         seg["clip"] = copy.deepcopy(sample["clip"])
+        pop = sample.get("pop") or {}
+        if pop:   # bật nhẹ lúc chữ hiện (keyframe học từ bản mẫu)
+            seg["uniform_scale"] = {"on": False, "value": float(seg["clip"]["scale"]["x"])}
+            seg["common_keyframes"] = [{
+                "id": _new_id(), "material_id": "", "property_type": prop,
+                "keyframe_list": [{"id": _new_id(), "curveType": "Line", "graphID": "",
+                                   "time_offset": min(int(t), _us(duration) - 1),
+                                   "left_control": {"x": 0.0, "y": 0.0}, "right_control": {"x": 0.0, "y": 0.0},
+                                   "values": [float(v)]} for t, v in kfs],
+            } for prop, kfs in pop.items()]
         track["segments"].append(seg)
 
     def add_audio(self, track: dict, src: Path, start: float, duration: float):
@@ -411,6 +432,29 @@ def update_draft_content(draft_dir: Path, edit) -> None:
                 _write_json(extra, content)
 
 
+def _load_screen_texts(run_dir: Path) -> list[dict]:
+    """Dòng [Text on screen] của kịch bản (lưu khi bấm "📌 Dùng cho Audio" — src/script_templates.py: screen_texts)."""
+    path = Path(run_dir) / "04_screen_text.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    except (ValueError, OSError):
+        return []
+
+
+def _screen_for_segment(items: list[dict], seg: dict) -> list[dict]:
+    kind = {"hook": "intro", "cta": "outro"}.get(seg.get("kind"), seg.get("kind"))
+    out = []
+    for it in items:
+        if it.get("kind") != kind:
+            continue
+        if kind == "product":
+            a, b = (it.get("product_name") or "").strip().lower(), (seg.get("product_name") or "").strip().lower()
+            if not a or not b or (a[:40] != b[:40] and a not in b and b not in a):
+                continue
+        out.append(it)
+    return out
+
+
 def _put_text(builder: "_DraftBuilder", texts_style: dict, role: str, track: dict, text: str,
               start: float, duration: float, default_style: dict) -> None:
     """Chữ theo bộ phong cách nếu có mẫu cho vai trò này, tắt nếu bộ phong
@@ -439,9 +483,15 @@ def _split_caption(text: str, start: float, duration: float, max_words: int) -> 
     return out
 
 
-def _add_transitions(builder: "_DraftBuilder", tracks: list, pool: list) -> None:
-    """Chuyển cảnh ở mọi điểm cắt giữa 2 clip liền nhau, xoay vòng theo danh
-    sách của bộ phong cách; lớp nền và lớp chính dùng CÙNG 1 kiểu tại 1 điểm cắt."""
+def _add_transitions(builder: "_DraftBuilder", tracks: list, pool: list, roles: Optional[dict] = None,
+                     section_starts: Optional[set] = None) -> None:
+    """Chuyển cảnh ở mọi điểm cắt giữa 2 clip liền nhau; lớp nền và lớp chính dùng CÙNG 1 kiểu tại 1 điểm cắt.
+    Bộ phong cách có vai trò (soft/accent, học từ bản mẫu): kiểu nhẹ cho cảnh thường, kiểu điểm nhấn khi sang
+    phần mới (Top khác) hoặc vào/ra clip video. Không có vai trò: xoay vòng danh sách như cũ."""
+    roles = roles or {}
+    by_name = {t["name"]: t for t in pool}
+    soft, accent = by_name.get(roles.get("soft")), by_name.get(roles.get("accent"))
+    kinds = {m["id"]: m.get("type") for m in builder.materials["videos"]}
     for track in tracks:
         segs = track["segments"]
         for i in range(len(segs) - 1):
@@ -449,7 +499,14 @@ def _add_transitions(builder: "_DraftBuilder", tracks: list, pool: list) -> None
             gap = b["target_timerange"]["start"] - (a["target_timerange"]["start"] + a["target_timerange"]["duration"])
             if abs(gap) > 2000:  # chỉ nối clip liền nhau (lệch làm tròn < 2ms)
                 continue
-            builder.add_transition(a, pool[i % len(pool)], b["target_timerange"]["duration"])
+            if soft and accent:
+                cut = b["target_timerange"]["start"]
+                boundary = any(abs(cut - t) < 50_000 for t in (section_starts or ()))
+                video_edge = "video" in (kinds.get(a["material_id"]), kinds.get(b["material_id"]))
+                tpl = accent if (boundary or video_edge) else soft
+            else:
+                tpl = pool[i % len(pool)]
+            builder.add_transition(a, tpl, b["target_timerange"]["duration"])
 
 
 def _unique_draft_dir(root: Path, name: str) -> Path:
@@ -497,10 +554,22 @@ def export_capcut_draft(
     draft_name: Optional[str] = None,
     drafts_root: Optional[Path] = None,
     style: Optional[dict] = None,
+    motion: Optional[dict] = None,
+    sfx: Optional[bool] = None,
+    video_first=True,
+    cue_sfx=True,
 ) -> Path:
     """Tạo draft CapCut từ run đã có 06_media_manifest.json. Trả về thư mục draft.
     `style` = bộ phong cách (src/capcut_style.py: load_style); bỏ trống thì
-    dùng kiểu mặc định (chữ *_STYLE ở đầu file, có zoom, không chuyển cảnh)."""
+    dùng kiểu mặc định (chữ *_STYLE ở đầu file, có zoom, không chuyển cảnh).
+    `motion` = Kiểu 2 chuyển động ảnh (src/capcut_motion.py): {"mode": "combo", "combos": [...],
+    "focus": {rank|"hook": điểm nhấn}, "zoom": 1.25} — None = Kiểu 1 (Ken Burns keyframe như cũ).
+    `video_first` = ưu tiên video sản phẩm (True / {"enabled", "max_ratio"} / False = cách cũ: ảnh là chính, video
+    chỉ thay câu dài nhất) — xem src/visual_plan.py.
+    `sfx` = thêm track hiệu ứng âm thanh theo thẻ [Sound Effect: ...] của 04_script.txt; None = tự bật khi audio là
+    giọng tự thu (giọng máy edge-tts đã có SFX sẵn trong file audio).
+    `cue_sfx` = tiếng theo lời thoại (src/cue_sfx.py): Mouse click khi bảo bấm link, Woosh khi sang Top mới, Drop coin
+    khi hô giá. True = cả 3, False = tắt, hoặc tập tên {"mouse_click", "woosh", "coin"}."""
     run_dir = Path(run_dir)
     manifest_path = run_dir / "06_media_manifest.json"
     if not manifest_path.exists():
@@ -529,17 +598,77 @@ def export_capcut_draft(
     t_top = builder.new_track("text")
     t_price = builder.new_track("text")
     t_highlight = builder.new_track("text")
+    screen_items = _load_screen_texts(run_dir)
+    t_screen = builder.new_track("text") if screen_items else None
     t_sub = builder.new_track("text")
     t_audio = builder.new_track("audio")
 
     timeline = 0.0
+    section_starts = set()   # µs: đầu mỗi phần (mở đầu / từng Top / kết) — chỗ đặt chuyển cảnh điểm nhấn
+    key_ids = {}   # id clip ảnh điểm nhấn (Kiểu 2) -> vùng điểm nhấn
+    from .capcut_sfx import recorded_voice, sfx_events
+    from .sfx import sfx_path
+    sfx_map = sfx_events(run_dir, manifest) if (recorded_voice(run_dir) if sfx is None else sfx) else {}
+    from .cue_sfx import cue_events, cue_path, cue_volume
+    cue_map = (cue_events(manifest, None if cue_sfx is True else set(cue_sfx)) if cue_sfx else {})
+    for order, evs in cue_map.items():          # đã có Woosh đầu Top -> bỏ tiếng theo thẻ ở đầu Top (như bạn sửa tay)
+        if any(n == "woosh" for _, n in evs) and order in sfx_map:
+            sfx_map[order] = [(t, k) for t, k in sfx_map[order] if t >= 1.5]
+    t_sfx = builder.new_track("audio") if sfx_map else None
+    t_cue = builder.new_track("audio") if cue_map else None
+    sfx_last_end = 0.0
+    cue_last_end = 0.0
+    focus_map = (motion or {}).get("focus", {})
+    if isinstance(video_first, dict):
+        vf_on, vf_ratio = bool(video_first.get("enabled", True)), float(video_first.get("max_ratio", 0.85))
+    else:
+        vf_on, vf_ratio = bool(video_first), 0.85
+    _vid_cache = {}
+
+    def _video_of(product):
+        """(đường dẫn, thời lượng) video của sản phẩm, hoặc None."""
+        _, vpath = find_product_media(product, run_dir)
+        if not vpath:
+            return None
+        if vpath not in _vid_cache:
+            try:
+                _vid_cache[vpath] = _probe_media(vpath)["duration"]
+            except Exception as e:
+                print(f"[CẢNH BÁO] Không đọc được video '{vpath.name}': {e}")
+                _vid_cache[vpath] = 0.0
+        return (vpath, _vid_cache[vpath]) if _vid_cache[vpath] > 0 else None
+
+    montage_items = []
+    if vf_on:
+        for p in sorted(products_data.get("selected_products", []), key=lambda x: x.get("rank") or 99):
+            imgs = list_all_product_images(p, run_dir)
+            montage_items.append({"video": _video_of(p), "image": imgs[0] if imgs else None})
     try:
         for seg in manifest:
             if not seg.get("audio_file"):
                 continue
             audio_path = run_dir / seg["audio_file"]
             duration = _audio_duration(audio_path)
+            section_starts.add(_us(timeline))
             builder.add_audio(t_audio, audio_path, timeline, duration)
+            for t_local, key in sfx_map.get(seg.get("order"), []):
+                fx_path = sfx_path(key)
+                fx_dur = _audio_duration(fx_path)
+                start = max(timeline + t_local - 0.25, timeline, sfx_last_end)   # ngay trước câu; không chồng nhau
+                if start + fx_dur > timeline + duration + 0.5:
+                    continue
+                builder.add_audio(t_sfx, fx_path, start, fx_dur)
+                t_sfx["segments"][-1]["volume"] = 0.8
+                sfx_last_end = start + fx_dur
+            for t_local, name in cue_map.get(seg.get("order"), []):
+                fx_path = cue_path(name)
+                fx_dur = min(_audio_duration(fx_path), 2.0)
+                start = max(timeline + t_local, cue_last_end)
+                if start + fx_dur > timeline + duration + 0.5:
+                    continue
+                builder.add_audio(t_cue, fx_path, start, fx_dur)
+                t_cue["segments"][-1]["volume"] = cue_volume(name)
+                cue_last_end = start + fx_dur
 
             product_info, fallback_images = None, []
             if seg.get("kind") == "product":
@@ -552,6 +681,12 @@ def export_capcut_draft(
                 fallback_images = montage_images
 
             beats = _build_beats(seg, duration)
+            for it in _screen_for_segment(screen_items, seg):
+                k = int(it.get("after") or 0)
+                t0 = beats[k]["start"] if k < len(beats) else 0.0
+                d = min(SCREEN_SECONDS, duration - t0)
+                if d > 0.5:
+                    _put_text(builder, texts_style, "screen", t_screen, it["text"], timeline + t0, d, SCREEN_STYLE)
             resolved = []
             for i, beat in enumerate(beats):
                 beat_dur = beat["end"] - beat["start"]
@@ -560,29 +695,46 @@ def export_capcut_draft(
                 img = (run_dir / beat["image"]) if beat.get("image") else _pick_fallback_image(fallback_images, i, len(beats))
                 resolved.append({"beat": beat, "index": i, "duration": beat_dur, "image": img})
 
-            # Cùng quy tắc với video_assembly: video thật thay câu dài nhất.
-            if seg.get("kind") == "product" and product_info and resolved:
-                _, video_path = find_product_media(product_info, run_dir)
-                if video_path:
-                    try:
-                        video_duration = _probe_media(video_path)["duration"]
-                    except Exception as e:
-                        print(f"[CẢNH BÁO] Không đọc được video '{video_path.name}': {e} — dùng ảnh tĩnh.")
-                        video_duration = 0.0
-                    longest = max(resolved, key=lambda r: r["duration"])
-                    if longest["duration"] >= _VIDEO_BEAT_MIN_DURATION and video_duration >= longest["duration"] + 0.2:
-                        longest["video"] = video_path
-                        longest["video_start"] = max(0.0, (video_duration - longest["duration"]) / 2)
-                        longest["image"] = object()
-
-            # Gộp beat liên tiếp cùng ảnh thành 1 clip — dễ kéo/thay ảnh trong CapCut.
             shots = []
-            for item in resolved:
-                if shots and not item.get("video") and not shots[-1].get("video") and shots[-1]["image"] == item["image"]:
-                    shots[-1]["duration"] += item["duration"]
-                else:
-                    shots.append(dict(item))
+            if vf_on:
+                # ƯU TIÊN VIDEO (src/visual_plan.py): video sản phẩm trước, ảnh sau; mở đầu / kết = montage video.
+                bounds = [r["beat"]["start"] for r in resolved]
+                if seg.get("kind") == "product" and product_info:
+                    beat_info = [{"start": r["beat"]["start"], "end": r["beat"]["start"] + r["duration"],
+                                  "text": r["beat"].get("text", ""),
+                                  "image": r["image"] if isinstance(r["image"], Path) else None} for r in resolved]
+                    shots = plan_product(duration, bounds, _video_of(product_info),
+                                         list_all_product_images(product_info, run_dir) or fallback_images,
+                                         max_ratio=vf_ratio, beats=beat_info)
+                elif seg.get("kind") in ("hook", "cta") and montage_items:
+                    shots = plan_montage(duration, bounds, montage_items,
+                                         max_len=5.0)
+                shots = [sh for sh in shots if sh["duration"] > 0.05]
+            if not shots:
+                # Cùng quy tắc với video_assembly: video thật thay câu dài nhất.
+                if seg.get("kind") == "product" and product_info and resolved:
+                    _, video_path = find_product_media(product_info, run_dir)
+                    if video_path:
+                        try:
+                            video_duration = _probe_media(video_path)["duration"]
+                        except Exception as e:
+                            print(f"[CẢNH BÁO] Không đọc được video '{video_path.name}': {e} — dùng ảnh tĩnh.")
+                            video_duration = 0.0
+                        longest = max(resolved, key=lambda r: r["duration"])
+                        if longest["duration"] >= _VIDEO_BEAT_MIN_DURATION and video_duration >= longest["duration"] + 0.2:
+                            longest["video"] = video_path
+                            longest["video_start"] = max(0.0, (video_duration - longest["duration"]) / 2)
+                            longest["image"] = object()
+
+                # Gộp beat liên tiếp cùng ảnh thành 1 clip — dễ kéo/thay ảnh trong CapCut.
+                shots = []
+                for item in resolved:
+                    if shots and not item.get("video") and not shots[-1].get("video") and shots[-1]["image"] == item["image"]:
+                        shots[-1]["duration"] += item["duration"]
+                    else:
+                        shots.append(dict(item))
             offset = timeline
+            first_photo_done = False
             for shot in shots:
                 src = shot.get("video") or shot["image"]
                 if isinstance(src, Path) and src.exists():
@@ -590,6 +742,11 @@ def export_capcut_draft(
                         builder.add_media(t_bg, src, offset, shot["duration"], shot.get("video_start", 0.0),
                                           background=bg_style)
                     builder.add_media(t_video, src, offset, shot["duration"], shot.get("video_start", 0.0))
+                    # Ảnh điểm nhấn (Kiểu 2): ảnh ĐẦU TIÊN của phần mở đầu và của mỗi Top.
+                    if motion and not first_photo_done and not shot.get("video") and seg.get("kind") in ("hook", "product"):
+                        key = "hook" if seg.get("kind") == "hook" else (product_info or {}).get("rank")
+                        key_ids[t_video["segments"][-1]["id"]] = focus_map.get(key, focus_map.get(str(key), "Giữa"))
+                        first_photo_done = True
                 offset += shot["duration"]
 
             for item in resolved:
@@ -599,8 +756,9 @@ def export_capcut_draft(
                 for chunk, c_start, c_dur in _split_caption(beat["text"], start, item["duration"], max_words):
                     _put_text(builder, texts_style, "subtitle", t_sub, chunk, c_start, c_dur, SUBTITLE_STYLE)
                 if beat.get("highlight"):
+                    h_max = texts_style.get("highlight", {}).get("max_seconds") or item["duration"]
                     _put_text(builder, texts_style, "highlight", t_highlight, beat["highlight"], start,
-                              item["duration"], HIGHLIGHT_STYLE)
+                              min(item["duration"], float(h_max)), HIGHLIGHT_STYLE)
                 if seg.get("kind") == "product" and item["index"] == 0 and product_info and product_info.get("reason_selected"):
                     _put_text(builder, texts_style, "intro", t_intro, product_info["reason_selected"], start,
                               item["duration"], INTRO_STYLE)
@@ -620,13 +778,20 @@ def export_capcut_draft(
 
         pool = style.get("transitions", {}).get("pool", []) if style.get("transitions", {}).get("enabled") else []
         if pool:
-            _add_transitions(builder, [t for t in (t_bg, t_video) if t is not None], pool)
+            _add_transitions(builder, [t for t in (t_bg, t_video) if t is not None], pool,
+                             style.get("transitions", {}), section_starts)
         builder.finalize_tracks()
         duration_us = _us(timeline)
         project_id, timeline_id = _new_id(), _new_id()
         content = builder.draft_content(timeline_id, duration_us)
         kb = style.get("ken_burns", DEFAULT_KEN_BURNS)
-        if kb.get("enabled", True):
+        if motion and motion.get("mode") == "combo":
+            from .capcut_motion import apply_combo_mode
+            stats = apply_combo_mode(content, content["tracks"].index(t_video), motion.get("combos") or [], key_ids,
+                                     zoom=float(motion.get("zoom") or 1.25))
+            print(f"  [CapCut] Kiểu 2: {stats['combo']} ảnh Combo, {stats['key']} ảnh keyframe điểm nhấn, "
+                  f"{stats['video']} clip video")
+        elif kb.get("enabled", True):
             apply_ken_burns(content, track_indexes=[content["tracks"].index(t_video)], params=kb)
         _write_json(draft_dir / "draft_content.json", content)
         _write_json(draft_dir / "Timelines" / timeline_id / "draft_content.json", content)

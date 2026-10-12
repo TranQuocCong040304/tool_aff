@@ -11,3 +11,7 @@ data/history.db
 # Dữ liệu đầu vào riêng của từng lần làm
 data/input/*
 !data/input/.gitkeep
+
+# Cache điểm vidIQ (tránh trả credit chấm lại)
+data/vidiq_cache.json
+data/title_memory.json

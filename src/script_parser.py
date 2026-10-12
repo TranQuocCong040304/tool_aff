@@ -43,6 +43,10 @@ def parse_image_blocks(raw_text: str) -> Optional[List[dict]]:
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(raw_text)
         blocks.append({"index": int(m.group(1)), "raw_text": raw_text[start:end].strip()})
+    # Chữ đứng TRƯỚC [[IMG:1]] (vd [Sound Effect: Swoosh] mở đoạn) -> gộp vào khối đầu, không bỏ mất.
+    head = raw_text[:matches[0].start()].strip()
+    if head:
+        blocks[0]["raw_text"] = (head + "\n" + blocks[0]["raw_text"]).strip()
     return blocks
 
 

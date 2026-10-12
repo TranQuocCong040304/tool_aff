@@ -24,37 +24,56 @@ def _relative_or_none(path, out_dir: Path):
 _HIGHLIGHT_BATCH_SIZE = 20
 
 
-def _extract_highlights(beat_texts: list[str], text_client) -> list[str]:
-    """Vài lệnh gọi Groq cho toàn bộ video (chia lô ~_HIGHLIGHT_BATCH_SIZE câu/
-    lần — gộp hết vào 1 lệnh từng bị cắt ngắn giữa chừng JSON khi video dài,
-    xem lỗi thật đã gặp): với mỗi câu thoại, rút ra 1 cụm từ nhấn mạnh ngắn
-    kiểu chữ to màu vàng/cam đè lên phụ đề (giống style CapCut phổ biến ở các
-    video Top 5 affiliate) — xem prompts/04d_highlight.md. Lô nào lỗi thì bỏ
-    qua trang trí cho riêng lô đó, không chặn cả video."""
-    non_empty = [(i, t) for i, t in enumerate(beat_texts) if t.strip()]
-    if not non_empty:
-        return [""] * len(beat_texts)
+def _highlight_batch(lines: list[str], text_client, depth: int = 0) -> list[str]:
+    """1 lô câu -> 1 cụm nhấn mạnh / câu. Groq trả SAI số lượng (hay gặp với lô dài) -> chia đôi lô và hỏi lại,
+    không bỏ trắng cả lô như trước (từng làm mất chữ nhấn mạnh ở cả phần mở đầu + Top đầu)."""
+    try:
+        prompt = render("04d_highlight.md", LINES_JSON=json.dumps(list(lines), ensure_ascii=False), COUNT=len(lines))
+        highlights = text_client.generate_json(prompt).get("highlights", [])
+    except Exception as e:
+        highlights = None
+        print(f"  [CẢNH BÁO] Sinh chữ nhấn mạnh lỗi cho {len(lines)} câu: {e}")
+    if isinstance(highlights, list) and len(highlights) == len(lines):
+        return [str(h or "").strip() for h in highlights]
+    if isinstance(highlights, list):
+        print(f"  [CẢNH BÁO] Groq trả {len(highlights)} chữ nhấn mạnh thay vì {len(lines)} — chia nhỏ lô hỏi lại.")
+    if len(lines) == 1:
+        return [str(highlights[0]).strip()] if isinstance(highlights, list) and highlights else [""]
+    if depth >= 4:
+        return [""] * len(lines)
+    mid = len(lines) // 2
+    return (_highlight_batch(lines[:mid], text_client, depth + 1)
+            + _highlight_batch(lines[mid:], text_client, depth + 1))
 
+
+def _extract_highlights(beat_texts: list[str], text_client) -> list[str]:
+    """Vài lệnh gọi Groq cho toàn bộ video (chia lô ~_HIGHLIGHT_BATCH_SIZE câu/lần): với mỗi câu thoại, rút ra 1 cụm
+    từ nhấn mạnh ngắn kiểu chữ to màu vàng/cam đè lên phụ đề — xem prompts/04d_highlight.md. Lô Groq trả sai số lượng
+    thì tự chia nhỏ hỏi lại (src: _highlight_batch)."""
+    non_empty = [(i, t) for i, t in enumerate(beat_texts) if t.strip()]
     out = [""] * len(beat_texts)
     for batch_start in range(0, len(non_empty), _HIGHLIGHT_BATCH_SIZE):
         batch = non_empty[batch_start:batch_start + _HIGHLIGHT_BATCH_SIZE]
         indices, lines = zip(*batch)
-        try:
-            prompt = render(
-                "04d_highlight.md",
-                LINES_JSON=json.dumps(list(lines), ensure_ascii=False),
-                COUNT=len(lines),
-            )
-            result = text_client.generate_json(prompt)
-            highlights = result.get("highlights", [])
-            if len(highlights) != len(lines):
-                print(f"  [CẢNH BÁO] Groq trả {len(highlights)} highlight thay vì {len(lines)} cho 1 lô — bỏ qua trang trí lô này.")
-                continue
-            for idx, h in zip(indices, highlights):
-                out[idx] = (h or "").strip()
-        except Exception as e:
-            print(f"  [CẢNH BÁO] Sinh chữ nhấn mạnh thất bại cho 1 lô: {e} — bỏ qua trang trí lô này.")
+        for idx, h in zip(indices, _highlight_batch(list(lines), text_client)):
+            out[idx] = h
     return out
+
+
+def refill_highlights(out_dir: Path, text_client, only_missing: bool = True) -> tuple[int, int]:
+    """Sinh lại chữ nhấn mạnh cho 06_media_manifest.json đã có (không cần làm lại audio).
+    Trả (số câu đã có chữ nhấn mạnh, tổng số câu)."""
+    path = Path(out_dir) / "06_media_manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    beats = [b for seg in manifest for b in seg.get("beats") or []]
+    todo = [b for b in beats if not (only_missing and (b.get("highlight") or "").strip())]
+    if todo:
+        print(f"Sinh lại chữ nhấn mạnh cho {len(todo)}/{len(beats)} câu (Groq)...")
+        for b, h in zip(todo, _extract_highlights([b.get("text", "") for b in todo], text_client)):
+            if h:
+                b["highlight"] = h
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return sum(1 for b in beats if (b.get("highlight") or "").strip()), len(beats)
 
 
 def run_media_step(
@@ -184,7 +203,7 @@ def finish_manifest(manifest: list, out_dir: Path, text_client=None) -> list:
 
     # Chỉ tính được mốc thời gian (timestamp) SAU KHI có audio thật, nên phần
     # mô tả YouTube đầy đủ (link + timestamp) được ghép ở đây — xem src/description.py.
-    description = build_youtube_description(out_dir)
+    description = build_youtube_description(out_dir, text_client)
     if description:
         (out_dir / "08_youtube_description.txt").write_text(description, encoding="utf-8")
 

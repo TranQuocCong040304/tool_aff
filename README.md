@@ -94,6 +94,7 @@ streamlit run app.py
 Mở <http://localhost:8501>. Sidebar dùng để chọn/tạo một **run** (phiên làm việc). Các tab đi đúng theo luồng CLI nhưng thao tác bằng chuột:
 
 - Upload file CSV/JSON đầu vào
+- **🔑 Từ khóa & Tiêu đề SEO** — lọc từ khóa chính / phụ / kéo traffic từ CSV, ghép tiêu đề SEO theo 10 công thức CTR (xem mục bên dưới)
 - Xem/upload ảnh sản phẩm theo từng thư mục
 - Sửa script ngay trên trình duyệt, nghe thử từng audio
 - Sửa mô tả YouTube (title, link, timestamp, hashtag) trước khi đăng
@@ -103,6 +104,95 @@ Mở <http://localhost:8501>. Sidebar dùng để chọn/tạo một **run** (ph
 CLI vẫn dùng song song được (cùng đọc/ghi thư mục `data/`).
 
 > Sau khi sửa code trong `src/`, cần **restart Streamlit** để nhận thay đổi. File prompt `prompts/*.md` thì được đọc lại mỗi lần chạy.
+
+### 🔑 Tab "Từ khóa & Tiêu đề SEO"
+
+Thả 1 hoặc nhiều CSV từ khóa (hoặc dùng luôn CSV trong `data/input/`). Toàn bộ chạy **offline, không tốn quota**:
+
+1. **Phân loại từ khóa** (`src/seo_titles.py` → `classify`):
+   - **Chính**: đoán theo tên file (`Tai-nghe-trợ-thính-không-dây_related_keywords.csv` → "tai nghe trợ thính không dây"), không khớp thì lấy từ khóa gốc có Overall cao nhất. Đổi được bằng ô chọn.
+   - **Kéo traffic**: top N volume cao nhất (mặc định 5). ⭐ = điểm vàng (volume cao, cạnh tranh dưới trung vị).
+   - **Phụ**: volume ≥ 50% từ khóa chính. **Đuôi dài**: còn lại — dùng cho mô tả + tag.
+   - **Loại**: tên cửa hàng, mã shop, từ lạc đề / quá rộng, cạnh tranh cao mà Overall thấp. Bản không dấu → chỉ làm tag.
+   - Kèm **nhóm ý định**: đối tượng ("cho …"), mua hàng / giá, đánh giá / tốt nhất, hướng dẫn, vấn đề, thương hiệu.
+   - Sai chỗ nào thì sửa ngay trên bảng (đổi Vai trò / bỏ tick Dùng) — tiêu đề tự cập nhật.
+2. **Ghép tiêu đề** theo 10 công thức, xếp ưu tiên CTR: CT2 Đối tượng + Lợi ích → CT1 Hỏi giá → CT8 Quà tặng → CT4 Top danh sách → CT3 Dùng thử → CT6 Cảnh báo → CT5 So sánh → CT9 Vấn đề → CT7 Hướng dẫn → CT10 Mở hộp, cộng các tổ hợp ghép (CT2+CT1, CT4+CT2, CT8+CT3).
+3. **Chấm điểm CTR ước lượng** 0-100: thứ hạng công thức + volume/cạnh tranh của từ khóa dùng + độ dài ≤ 60 ký tự + từ khóa trong 5 từ đầu + có số/năm + chỉ 1 câu hỏi. Cụm "chữa khỏi", "100%", "thay thế bác sĩ"… bị trừ nặng.
+4. **Tag YouTube** (< 500 ký tự), từ khóa nên có trong 2 dòng đầu mô tả, checklist trước khi đăng.
+5. Tải về CSV/JSON, hoặc **📌 đặt làm tiêu đề video của run** → lưu `09_seo_keywords.json`, ghi đè `title` trong `05_metadata.json` (kể cả khi viết lại script sau này) và đi vào Lịch sử.
+
+Nút **✨ Nhờ AI (Groq) viết thêm** gửi bảng từ khóa đã phân loại + 10 công thức (`prompts/07_seo_titles.md`) — kết quả AI được chấm điểm cùng thang.
+
+#### 🔗 Từ khóa SEO đi vào script (tab ✍️ Script & Audio)
+
+Bấm **📌 Đặt làm tiêu đề video của run này** ở tab 🔑 → lưu `09_seo_keywords.json` vào run. Khi bấm **✍️ Viết script**, tool tự đọc file này (`src/seo_context.py`) — bạn không phải nhập lại:
+
+- **Hook** nhận tiêu đề: 2 câu đầu nhắc lại lời hứa của tiêu đề + nói nguyên văn từ khóa có trong tiêu đề, rồi tới từ khóa chính. Tiêu đề hứa trải nghiệm ("Tôi thử 30 ngày"…) mà chưa tick xác nhận là thật → hook KHÔNG bịa trải nghiệm, nói trung thực ("mình đã tìm hiểu, so sánh kỹ…").
+- **Từng sản phẩm** nhận tối đa 2 từ khóa do CODE chia: giá rẻ → Top rẻ nhất; cao cấp / tốt nhất → Top 1; đặc tính / đối tượng / thương hiệu → sản phẩm có đặc tính đó trong tên / nhu cầu (vd "nhập khẩu" → máy Beurer "Nhập Khẩu Đức"); từ khóa chính nhắc thêm 1 lần ở sản phẩm giữa video. Từ khóa tắt Dùng / Loại / Cần xác nhận không bao giờ được giao.
+- **CTA**: từ khóa chính + 1 từ khóa mua hàng. **Mô tả**: 2 câu đầu chứa từ khóa phụ; hashtag tối đa 5; **thẻ YouTube** đầy đủ hiện riêng để dán vào ô Thẻ.
+- Khung **🔑 Đầu vào SEO cho script** cho xem trước từ khóa của từng phần (0 quota); bảng **🔎 Từ khóa đã nói** do code đếm sau khi viết (cảnh báo chưa nói / lặp nhiều); nút **🔁 Viết lại hook & CTA theo tiêu đề** chỉ gọi Groq, giữ nguyên lời bình sản phẩm (kể cả phần sửa tay).
+- Chưa bấm 📌 → dùng tạm từ khóa của bước Chọn sản phẩm (`02_keywords_filtered.json`), không có tiêu đề. Không có gì → script viết như trước.
+
+#### 🎯 Chấm điểm bằng vidIQ (tùy chọn, mục 4 trong tab)
+
+App gọi thẳng **vidIQ MCP** (`https://mcp.vidiq.com/mcp`) từ Python (`src/vidiq_client.py`), không qua model AI trung gian, nên **điểm do code đọc trực tiếp từ kết quả vidIQ**, AI không thể bịa điểm.
+
+Cấu hình trong `.env`:
+
+```
+VIDIQ_API_KEY=        # app.vidiq.com → Account Settings → MCP (vidIQ MCP cần gói Max)
+VIDIQ_CHANNEL_ID=     # (tùy chọn) ID kênh UC... để điểm sát kênh của bạn
+```
+
+Dán key xong chỉ cần F5 trang (không phải khởi động lại). Quy trình (`src/vidiq_flow.py`):
+
+1. Lọc từ khóa volume ≥ 750, bỏ từ khóa bị Loại → 2. chọn 3-5 từ khóa mục tiêu (volume cao, cạnh tranh thấp)
+3. 8-10 tiêu đề nháp ≤ 100 ký tự từ bộ 10 công thức (mỗi tiêu đề chứa ≥ 1 từ khóa mục tiêu)
+4. Chấm từng tiêu đề bằng `vidiq_score_title` (type `long`/`short`, 5 credit/lần)
+5. Chưa có tiêu đề ≥ 90 → lấy mẫu điểm cao bằng `vidiq_generate_titles` (language `vi`), Groq viết lại theo mẫu (`prompts/08_vidiq_rewrite.md`), chấm lại — tối đa 4 vòng
+6. Chỉ hiển thị điểm vidIQ trả về; không đạt thì hiện tiêu đề tốt nhất kèm điểm thật
+
+**Tự học để lần sau ít vòng hơn** (`data/title_memory.json`): mọi tiêu đề vidIQ đã chấm được lưu lại và rút thành *khung* (thay từ khóa bằng `{TỪ KHÓA}`, năm bằng `{NĂM}`, vd `{TỪ KHÓA} {NĂM}: Tôi Thử 30 Ngày Và Kết Quả Thật Bất Ngờ` — 93 điểm). Lần sau, kể cả sản phẩm khác, vòng 1 thử khung điểm cao trước; Groq viết lại được xem tiêu đề điểm cao / thấp đã học; và tool **chạy tới khi có đủ N tiêu đề KHÁC NHAU đạt ≥ 90** (mặc định 3 — tiêu đề chỉ khác 1-2 từ hoặc cùng khung chỉ đổi từ khóa tính là 1) rồi dừng ngay, không chấm nốt cả vòng. Mỗi khung ghi nhớ học từ sản phẩm nào: khung của CÙNG sản phẩm luôn dùng được; khung của sản phẩm KHÁC chỉ dùng chéo khi không còn chữ riêng của sản phẩm cũ (tên sản phẩm, đối tượng — vd "{TỪ KHÓA}: Gần Như Tàng Hình Trong Tai!" của máy trợ thính không bị đem sang nồi chiên), và Groq chỉ được xem KHUNG chứ không xem tên sản phẩm khác. Xem / xóa bộ nhớ ở mục "📚 Bộ nhớ đã học".
+
+Bảo vệ credit: có nút **Kiểm tra kết nối (0 credit)**, xem trước vòng 1 miễn phí, ô xác nhận số credit tối đa, **trần credit mỗi lần chạy** (mặc định 150), và cache điểm theo (kênh, loại, tiêu đề) trong `data/vidiq_cache.json` — không bao giờ trả tiền chấm lại cùng 1 tiêu đề. Tiêu đề đã chấm vidIQ đứng đầu danh sách chọn ở mục "Xuất & gắn vào run".
+
+---
+
+### 🎯 Tab "Chọn sản phẩm" — dashboard chống bịa
+
+Trước khi gửi Groq, CODE chuẩn bị dữ liệu (`src/product_filter.py`) và hiện **📊 Dữ liệu sẽ gửi Groq — xem trước (0 quota)**:
+
+- **Từ khóa:** file "Từ khóa đã phân loại" (tab 🔑) → chỉ gửi từ khóa đang tick Dùng; CSV gốc → tự loại tên cửa hàng / mã shop / lạc đề. Từ khóa chính đứng đầu.
+- **Sản phẩm:** bỏ trùng → bỏ phụ kiện (pin, núm tai, hộp, dây sạc… "dùng cho máy…") → bỏ sản phẩm có tên không chứa tên sản phẩm của từ khóa nào → còn lại xếp theo lượt bán, lấy 30. Bảng từng sản phẩm kèm trạng thái + từ khóa có trong tên.
+
+Sau khi chạy, **📊 Báo cáo chọn sản phẩm** (lưu ở `02b_selection_report.json` của run):
+
+- Từ khóa Groq chọn — từ khóa **không có trong CSV bị chặn tự động** (Groq hay tự ghép, vd "máy trợ thính không dây cao cấp") và được báo rõ.
+- 5 sản phẩm được chọn: code đối chiếu tên với từ khóa, cảnh báo sản phẩm không khớp. Tên / giá / link luôn lấy từ file JSON gốc theo mã sản phẩm, Groq không tự viết.
+- Run cũ (chưa có báo cáo) vẫn được đối chiếu với CSV hiện có trong `data/input/`.
+
+### 🧩 Tab "Script & Audio" — kịch bản theo mẫu kênh (1 nút, nhiều kênh)
+
+Khung đầu tab ✍️. Đầu vào: **tiêu đề SEO** (ô nhập, mặc định lấy từ tab 🔑) + **file CSV từ khóa** (ô upload, lưu `script_keywords.csv` trong run; tool tự phân loại Chính / Kéo traffic / Phụ / Đuôi dài) + **5 sản phẩm** kèm ảnh thật và file `.md` của tab 🖼️.
+
+- Mẫu kịch bản = file prompt trong `prompts/script_templates/*.md` (dòng đầu `# Tên mẫu`). Thêm / sửa / xóa ngay trong app (✏️ Quản lý mẫu). Có sẵn mẫu chung **AIDA 5 sản phẩm**; chỗ cần tên kênh trong mẫu ghi `{{KENH}}`, điền tên kênh ở ô "Tên kênh" lúc tạo (để trống = "kênh của mình").
+- Chọn nhiều mẫu → bấm **🚀 Tạo kịch bản** → mỗi mẫu ra 1 kịch bản (`<run>/scripts/<mẫu>__<giờ>.json` + `.md`). Gemini viết từng phần (mở đầu → Top 5…Top 1 → kết, 7 lần gọi/kịch bản), lưu sau mỗi phần — hết quota thì bấm lại sẽ viết tiếp.
+- **Quy tắc trung thực** luôn gắn sau mẫu và thắng mẫu khi mâu thuẫn: không bịa số liệu "đã test" (trừ khi tick đã test thật), không tự nhận đại lý uỷ quyền / mall nếu dữ liệu không ghi, không bịa voucher / flash sale / số lượng có hạn (chỉ nói ưu đãi bạn nhập), không bịa "shop dính phốt", không hứa hẹn y tế, có câu công khai link affiliate.
+- **⏱️ Độ dài video mục tiêu (phút)** (thanh kéo đầu tab, mặc định 6–9 phút, lưu `script_length.json`): tool đổi ra số từ (theo ô 🗣️ Tốc độ giọng đọc — mặc định 225 từ/phút, đo lại được từ voice thật; lưu chung ở `data/voice_speed.json`: hook 8%, CTA 8%, còn lại chia đều 5 sản phẩm) và gắn vào prompt của CẢ kịch bản theo mẫu lẫn script mặc định — ưu tiên hơn độ dài ghi trong mẫu. Viết xong có bảng ⏱️ số từ / thời lượng từng phần so với mục tiêu.
+- **🔊 Hiệu ứng âm thanh (SFX)** (ô tick cạnh thanh độ dài, mặc định bật): AI đặt `[Sound Effect: Swoosh / Pop / Ding / Chime / Tension / Heartbeat / Tick Tock / Win]` ở mở đầu, chuyển sản phẩm, trước nhược điểm, trước câu bấm link. Lúc sinh audio (edge-tts), `src/sfx.py` chèn **âm thanh thật** vào đúng chỗ đó (tiếng tự tổng hợp, cache ở `assets/sfx/_auto/`; muốn dùng tiếng của mình thì thả `assets/sfx/<tên>.mp3`, vd `swoosh.mp3`). Có ô nghe thử trong app. Giọng tự thu thì không chèn SFX (bạn tự thêm khi dựng).
+- **🎭 Thẻ giọng đọc** (ô tick, mặc định bật — `src/voice_tones.py`): AI mở mỗi đoạn ý bằng 1 thẻ như `[Giọng trầm, nghiêm túc]`, `[Chê nhẹ / Khách quan]`, `[Năng lượng cao, bùng nổ]` (chỉ Top 1), `[Hối thúc, dứt khoát]`… Kịch bản thu âm (giọng tự thu) có ô "Giữ thẻ giọng đọc & hiệu ứng" để dán vào giọng AI đọc được thẻ (ElevenLabs v3, Gemini…). edge-tts không đọc được cảm xúc — thẻ chỉ thành nhịp ngắt ngắn.
+- **⚡ Viết nhanh** (tự động): Gemini giảm "thinking" khi viết lời bình, 5 sản phẩm viết **song song** (mặc định 3 cùng lúc), ảnh > 1024px thu nhỏ trước khi gửi, viết script KHÔNG chờ upload video (chỉ dùng ảnh + file .md; video vẫn dùng khi dựng). Tùy chỉnh trong `.env`: `SCRIPT_PARALLEL=3` (giảm xuống 1–2 nếu hay gặp lỗi giới hạn request/phút), `GEMINI_FALLBACK_MODEL=` (model dự phòng khi model chính quá tải 503), `SCRIPT_USE_VIDEO=1` (gửi cả video), `GEMINI_FAST_WRITE=0` (tắt giảm thinking), `GEMINI_THINKING_LEVEL=low`.
+- **🎯 Bám tiêu đề SEO**: tool phân tích tiêu đề → từ khóa CHÍNH = cụm có trong tiêu đề (câu đầu hook 0–15s, chữ trên màn hình mở đầu, nhắc lại ở kết); PHỤ → thân video từng sản phẩm; TRAFFIC (câu hỏi / mua / tốt nhất / Kéo traffic) → 3 dòng đầu mô tả, tags, chương. Liệt kê các lời hứa của tiêu đề (năm, Top N, đánh giá cao, giá, thuộc tính như “siêu nhỏ”) để AI chứng minh bằng dữ liệu; cảnh báo khi từ khóa Chính trong CSV khác tiêu đề, hoặc tiêu đề hứa “thực nghiệm” mà chưa tick đã test. Khung chat còn xin thêm phần `=== MÔ TẢ YOUTUBE ===` (3 dòng đầu mô tả, chương, tags).
+- **💬 Làm qua khung chat AI** (không tốn API key): tool gom 1 prompt cho cả kịch bản (mẫu + quy tắc + độ dài + hiệu ứng + thẻ giọng + dữ liệu 5 sản phẩm) → copy dán vào Claude / Gemini / ChatGPT web (có thể tải zip ảnh để kéo vào chat) → dán câu trả lời lại, tool tách đúng 7 phần (`=== MỞ ĐẦU ===`, `=== TOP 5 ===`… `=== KẾT ===`), báo phần thiếu, lưu như kịch bản bình thường.
+- Xem kịch bản / bảng chữ trên màn hình & âm thanh / chỉ lời đọc; tải `.md` hoặc `.txt`. **📌 Dùng cho Audio** chuyển kịch bản thành `04_script.txt` (bỏ chỉ dẫn [Text on screen] / [Sound Effect]) để sinh audio & ghép video như bình thường.
+
+---
+
+### 🎞️ Project CapCut — 2 kiểu chuyển động ảnh
+
+- **Kiểu 1 — Keyframe Ken Burns**: zoom + trượt mượt cho mọi ảnh (như cũ, kèm Auto Keyframe Pro).
+- **Kiểu 2 — Combo Animation 90% + Keyframe điểm nhấn 10%** (`src/capcut_motion.py`): ảnh thường gắn hiệu ứng Combo có sẵn của CapCut (Zoom 1, Zoom 2, Pendulum… luân phiên) — nhanh, nhịp dồn dập; ảnh ĐẦU của phần mở đầu và của mỗi Top dùng keyframe ease phóng to + trượt vào vùng bạn chọn (Giữa / Trên / Dưới-phải…, vd chỗ có giá). Auto Keyframe Pro vẫn làm lớp nền mờ nhưng không ghi đè chuyển động.
+- Combo phải **học 1 lần** từ CapCut (mục 🎞️ Học hiệu ứng Combo): tạo project, gắn Combo cho vài ảnh, thoát về màn hình chính, chọn project trong app → lưu ở `data/capcut_combos.json` (chép đúng hiệu ứng CapCut đã tải trên máy, không tự bịa ID).
 
 ---
 
@@ -190,6 +280,7 @@ Tất cả nằm trong `data/output/<run_id>/`:
 | `06_media_manifest.json` | Từng câu + ảnh + timing, dùng để ghép video |
 | `07_flow_prompts.md` | Prompt Google Flow (chỉ khi có sản phẩm thiếu ảnh) |
 | `08_youtube_description.txt` | Mô tả YouTube đầy đủ: mở đầu → link sản phẩm → timestamp → hashtag |
+| `09_seo_keywords.json` | (tùy chọn) Từ khóa đã phân loại + tiêu đề SEO + tiêu đề đã chọn, từ tab "Từ khóa & Tiêu đề SEO" |
 | `audio/*.mp3` | Mỗi đoạn một file, giọng liền mạch |
 | `final_video.mp4` | Video hoàn chỉnh |
 
@@ -238,6 +329,8 @@ Các prompt nằm trong `prompts/*.md`, dùng cú pháp `{{PLACEHOLDER}}` — s�
 | `04b_product_segment.md` | Prompt **duy nhất** nhận ảnh/video (Gemini). Yêu cầu đánh dấu `[[IMG:n]]` trước mỗi câu — **giữ nguyên định dạng này** vì `src/script_parser.py` và `src/video_assembly.py` dựa vào đó để khớp ảnh với câu. |
 | `04d_highlight.md` | Sinh cụm chữ nhấn mạnh màu vàng (Groq, chia lô 20 câu/lần). Lô nào lỗi thì bỏ qua, không chặn audio/video. |
 | `05_metadata.md` | Sinh title, tags, `hook_description`, `hook_label` / `outro_label` cho mô tả YouTube. |
+| `07_seo_titles.md` | (tùy chọn) Nhờ Groq viết thêm tiêu đề SEO theo 10 công thức, ở tab "Từ khóa & Tiêu đề SEO". |
+| `08_vidiq_rewrite.md` | (tùy chọn) Groq viết lại tiêu đề theo mẫu điểm cao của vidIQ khi chưa đạt ngưỡng. |
 
 **Một số tham số hay chỉnh:**
 
@@ -270,3 +363,7 @@ Các prompt nằm trong `prompts/*.md`, dùng cú pháp `{{PLACEHOLDER}}` — s�
 | `src/description.py` | Ghép `08_youtube_description.txt` từ metadata + timing thật |
 | `src/video_assembly.py` | Ghép MP4 bằng MoviePy + Pillow + OpenCV (xem comment đầu file) |
 | `src/database.py` | SQLite log lịch sử + hiệu suất |
+| `src/seo_titles.py` | Phân loại từ khóa + ghép/chấm điểm tiêu đề SEO theo 10 công thức (offline) |
+| `src/seo_ui.py` | Giao diện tab "Từ khóa & Tiêu đề SEO" |
+| `src/vidiq_client.py` | Client MCP (Streamable HTTP) gọi vidIQ: chấm điểm, gợi ý tiêu đề, xem credit |
+| `src/vidiq_flow.py` | Quy trình 6 bước chấm/viết lại tiêu đề bằng vidIQ, trần credit + cache |

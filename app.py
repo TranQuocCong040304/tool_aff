@@ -6,6 +6,8 @@ Chạy:
 
 Luồng trên UI giống hệt CLI, chỉ đổi cách thao tác:
     1) Dữ liệu đầu vào  -> upload CSV từ khóa + JSON sản phẩm vào data/input/
+    1b) Từ khóa & Tiêu đề SEO -> lọc từ khóa chính/phụ/kéo traffic từ CSV, ghép
+       tiêu đề SEO theo 10 công thức CTR (offline), gắn tiêu đề vào run
     2) Chọn sản phẩm     -> chạy Prompt 1-3 (Groq), chọn ĐÚNG 5 sản phẩm
     3) Ảnh sản phẩm      -> upload ảnh/video thật lấy từ Shopee cho từng sản phẩm
     4) Script & Audio    -> Gemini viết lời bình bám ảnh (Bước 2) + edge-tts
@@ -14,6 +16,7 @@ Luồng trên UI giống hệt CLI, chỉ đổi cách thao tác:
 """
 import json
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -25,13 +28,21 @@ from src.gemini_client import GeminiClient
 from src.groq_client import GroqClient
 from src.ingestion import load_keywords, load_products
 from src.llm_errors import LLMJSONError, LLMQuotaExceededError, LLMServerError
-from src.media_step import run_media_step
+from src.media_step import refill_highlights, run_media_step
+from src.script_parser import parse_segments
 from src.pipeline import (
+    regenerate_hook_cta,
     run_script_stage,
     run_selection_stage,
     save_script_result,
     save_selection_result,
 )
+from src.seo_ui import render_keyword_filter, render_seo_tab
+from src.selection_ui import render_selection_preview, render_selection_report
+from src.media_info_ui import md_status, render_bulk_md_upload, render_product_md
+from src.script_seo_ui import render_seo_coverage, render_seo_input, render_youtube_tags
+from src.script_template_ui import (render_audio_source_notice, render_length_report, render_length_target,
+                                    render_template_scripts)
 from src.product_links import (
     create_media_folders,
     list_all_product_images,
@@ -40,11 +51,18 @@ from src.product_links import (
 from src.tts import DEFAULT_VOICE
 from src.voice_import import AUDIO_TYPES, import_recorded_voice, recording_script
 from src.utils import slugify
+from src.shopee_crawl import (crawl_dir, describe as describe_crawl, download_root, download_roots as download_roots_crawl,
+                              import_result as import_crawl,
+                              latest_result as latest_crawl, open_crawl, open_many as open_many_crawl,
+                              wait_many as wait_many_crawl, wait_result as wait_crawl)
 from src.capcut_akp import (BLUR_LEVELS as AKP_BLUR_LEVELS, DEFAULT_OPTIONS as AKP_DEFAULTS,
                             KEYFRAME_STYLES as AKP_KEYFRAME_STYLES, SUBTITLE_STYLES as AKP_SUBTITLE_STYLES,
                             enhance_draft)
 from src.capcut_export import capcut_is_running, default_drafts_root, export_capcut_draft
 from src.capcut_style import describe_style, extract_style, list_styles, load_style, save_style
+from src.capcut_sfx import recorded_voice as capcut_recorded_voice
+from src.capcut_motion import (FOCUS_POINTS as COMBO_FOCUS_POINTS, learn_combos, load_library as load_combo_library,
+                               save_library as save_combo_library)
 from src.render_job import any_render_running, get_status, start_render
 
 load_dotenv()
@@ -127,7 +145,12 @@ st.sidebar.title("🎬 Auto Video Affiliate")
 
 existing_runs = list_output_runs()
 run_options = ["➕ Tạo run mới"] + [p.name for p in existing_runs]
-choice = st.sidebar.selectbox("Chọn phiên làm việc (run)", run_options)
+# Run vừa tạo ở tab "Chọn sản phẩm": tự chọn sẵn ở đây. Phải gán TRƯỚC khi vẽ ô chọn — Streamlit không cho
+# sửa giá trị 1 ô đã vẽ (StreamlitWidgetAlreadyInstantiatedError), nên tab đó chỉ ghi "_pending_run_choice".
+_pending_run = st.session_state.pop("_pending_run_choice", None)
+if _pending_run in run_options:
+    st.session_state["run_choice"] = _pending_run
+choice = st.sidebar.selectbox("Chọn phiên làm việc (run)", run_options, key="run_choice")
 
 if choice == "➕ Tạo run mới":
     run_dir = None
@@ -144,8 +167,9 @@ if client_err:
     st.sidebar.error(client_err)
     st.sidebar.caption("Điền GEMINI_API_KEY / GROQ_API_KEY vào file .env rồi tải lại trang.")
 
-tab_input, tab_select, tab_media, tab_script, tab_video, tab_history = st.tabs(
-    ["📥 Dữ liệu đầu vào", "🎯 Chọn sản phẩm", "🖼️ Ảnh sản phẩm", "✍️ Script & Audio", "🎬 Video", "📊 Lịch sử"]
+tab_input, tab_seo, tab_select, tab_media, tab_script, tab_video, tab_history = st.tabs(
+    ["📥 Dữ liệu đầu vào", "🔑 Từ khóa & Tiêu đề SEO", "🎯 Chọn sản phẩm", "🖼️ Ảnh sản phẩm",
+     "✍️ Script & Audio", "🎬 Video", "📊 Lịch sử"]
 )
 
 
@@ -162,6 +186,11 @@ with tab_input:
     if current_files:
         st.write("File hiện có trong `data/input/`:")
         for f in current_files:
+            if f.is_dir():
+                if f.name == "_csv_goc":
+                    st.caption(f"📁 `{f.name}/` — {len(list(f.glob('*.csv')))} file CSV gốc đã lọc (giữ để đối chiếu, "
+                               "không dùng khi tạo run)")
+                continue
             if f.name != ".gitkeep":
                 col1, col2 = st.columns([5, 1])
                 col1.write(f"- `{f.name}` ({f.stat().st_size // 1024} KB)")
@@ -177,11 +206,21 @@ with tab_input:
         accept_multiple_files=True,
     )
     if uploaded:
-        if st.button("Lưu vào data/input/"):
+        if st.button("Lưu vào data/input/", help="Lưu nguyên file (không lọc). Muốn lọc từ khóa trước thì bấm "
+                                                "🔎 Lọc ở bên dưới — JSON thả cùng lúc cũng được lưu."):
             for f in uploaded:
                 (INPUT_DIR / f.name).write_bytes(f.getvalue())
             st.success(f"Đã lưu {len(uploaded)} file.")
             st.rerun()
+
+    st.divider()
+    render_keyword_filter(INPUT_DIR, uploaded)
+
+
+# ------------------------------------------------------------- tab: seo --
+
+with tab_seo:
+    render_seo_tab(INPUT_DIR, run_dir, text_client, client_err)
 
 
 # ---------------------------------------------------------- tab: select --
@@ -193,9 +232,16 @@ with tab_select:
         selection_data = load_json(run_dir / "03_products_selected.json")
         niche_data = load_json(run_dir / "01_niche.json")
         if selection_data:
-            st.success(f"Run `{run_dir.name}` đã chọn xong sản phẩm.")
+            if st.session_state.get("_last_created_run") == run_dir.name:
+                st.session_state.pop("_last_created_run", None)
+                st.success(f"🎉 Đã tạo run `{run_dir.name}` và tự chuyển sang run này — xem báo cáo + 5 sản phẩm bên "
+                           "dưới, rồi sang tab **🖼️ Ảnh sản phẩm** để làm tiếp.")
+            else:
+                st.success(f"Run `{run_dir.name}` đã chọn xong sản phẩm.")
             if niche_data:
                 st.write(f"**Ngách:** {niche_data.get('niche')}")
+            # Dashboard: từ khóa Groq chọn (đã chặn từ khóa bịa), 5 sản phẩm khớp từ khóa nào, dữ liệu đầu vào.
+            render_selection_report(run_dir, selection_data, INPUT_DIR)
             for p in selection_data.get("selected_products", []):
                 tier = f" ({p['tier']})" if p.get("tier") else ""
                 with st.expander(f"TOP {p['rank']}{tier}: {p['name']}"):
@@ -217,23 +263,29 @@ with tab_select:
         json_files = list(INPUT_DIR.glob("*.json"))
         st.caption(f"Tìm thấy {len(csv_files)} file CSV, {len(json_files)} file JSON trong data/input/.")
 
-        disabled = client_err is not None or not csv_files or len(json_files) != 1
-        if len(json_files) > 1:
-            st.error(f"Có {len(json_files)} file JSON trong data/input/ — chỉ được để đúng 1 file sản phẩm.")
-        elif not csv_files or not json_files:
+        last_run = st.session_state.pop("_last_created_run", None)
+        if last_run and (OUTPUT_DIR / last_run / "03_products_selected.json").exists():
+            st.success(f"Đã tạo run `{last_run}` — bấm nút dưới (hoặc chọn ở sidebar) để mở run và làm tiếp. "
+                       "Báo cáo của run vừa tạo:")
+            st.button(f"➡️ Mở run {last_run}", type="primary", key="open_new_run",
+                      on_click=lambda r=last_run: st.session_state.update(run_choice=r))
+            render_selection_report(OUTPUT_DIR / last_run, load_json(OUTPUT_DIR / last_run / "03_products_selected.json"),
+                                    INPUT_DIR)
+
+        disabled = client_err is not None or not csv_files or not json_files
+        if not csv_files or not json_files:
             st.error("Thiếu file CSV từ khóa hoặc JSON sản phẩm — thêm ở tab 'Dữ liệu đầu vào'.")
 
+        # Dashboard xem trước (0 quota): từ khóa / sản phẩm nào sẽ gửi Groq, cái nào bị loại và vì sao.
+        prepared = render_selection_preview(INPUT_DIR) if csv_files and json_files else None
+        disabled = disabled or prepared is None
+
         if st.button("🚀 Chạy chọn sản phẩm (Prompt 1-3)", disabled=disabled, type="primary"):
-            try:
-                keywords = load_keywords(INPUT_DIR)
-                products = load_products(json_files[0])
-            except (FileNotFoundError, ValueError) as e:
-                st.error(f"[LỖI DỮ LIỆU ĐẦU VÀO] {e}")
-                st.stop()
+            keywords, products, input_report = prepared
 
             with st.spinner(f"Đang chọn ngách + lọc 5 sản phẩm từ {len(keywords)} từ khóa, {len(products)} sản phẩm..."):
                 try:
-                    selection = run_selection_stage(keywords, products, text_client)
+                    selection = run_selection_stage(keywords, products, text_client, report=input_report)
                 except (LLMJSONError, LLMQuotaExceededError, LLMServerError) as e:
                     st.error(f"[LỖI] {e}")
                     st.stop()
@@ -243,7 +295,8 @@ with tab_select:
             save_selection_result(selection, new_run_dir)
             write_product_links_file(selection.selected_products, new_run_dir)
             create_media_folders(selection.selected_products, new_run_dir)
-            st.success(f"Đã tạo run `{new_run_id}` — chọn nó ở sidebar để tiếp tục sang tab 'Ảnh sản phẩm'.")
+            st.session_state["_last_created_run"] = new_run_id   # hiện thông báo ở run vừa tạo
+            st.session_state["_pending_run_choice"] = new_run_id  # tự chuyển sidebar sang run vừa tạo
             st.rerun()
 
 
@@ -263,22 +316,117 @@ with tab_media:
                 "rồi upload lại đây — Gemini sẽ viết lời bình bám theo ĐÚNG những ảnh này "
                 "(tối đa 6 ảnh quan trọng nhất/sản phẩm được gửi cho Gemini)."
             )
-            for p in selection_data.get("selected_products", []):
+            products_sel = selection_data.get("selected_products", [])
+            # 🕷️ Crawl asset: extension Shopee Save (dist) tự tải ảnh / video / .md -> tool tự chèn vào đúng ô.
+            with st.container(border=True):
+                st.markdown("**🕷️ Crawl asset tự động** (cần extension **Shopee Save** bản có chế độ Crawl, cài trong "
+                            "Chrome và đã đăng nhập Shopee)")
+                st.caption(f"Bấm nút → Chrome mở trang sản phẩm → extension tự tải hết ảnh chính / biến thể / mô tả / "
+                           f"video / thông tin .md vào `{crawl_dir()}` rồi tự đóng tab → tool chép vào đúng ô bên dưới "
+                           "(thay ảnh / video cũ của sản phẩm đó). Thư mục tải của Chrome khác thì đặt "
+                           "SHOPEE_DOWNLOAD_DIR trong .env.")
+                from src.shopee_crawl import current_profile, list_profiles, save_profile
+                _profiles = list_profiles()
+                if len(_profiles) > 1:
+                    _cur = current_profile()
+                    _dirs = [p_["dir"] for p_ in _profiles]
+                    _lab = {p_["dir"]: f"{p_['name']}" + (f" · {p_['email']}" if p_["email"] else "")
+                            + (" · ✅ có extension" if p_["ext"] else " · ❌ chưa cài extension") + f"  ({p_['dir']})"
+                            for p_ in _profiles}
+                    _pick = st.selectbox("👤 Mở crawl bằng tài khoản Chrome", _dirs,
+                                         index=_dirs.index(_cur) if _cur in _dirs else 0, format_func=_lab.get,
+                                         key="crawl_chrome_profile",
+                                         help="Chọn đúng tài khoản Chrome bạn đang dùng (có extension Shopee Save và đã "
+                                              "đăng nhập Shopee). Tool nhớ lựa chọn này cho các lần sau.")
+                    if _pick != _cur:
+                        save_profile(_pick)
+                        st.toast(f"Đã lưu: crawl mở bằng tài khoản {_lab[_pick].split('  (')[0]}")
+                    if not next(p_ for p_ in _profiles if p_["dir"] == _pick)["ext"]:
+                        st.warning("Tài khoản Chrome này CHƯA cài extension Shopee Save → crawl sẽ không tải được. "
+                                   "Chọn tài khoản khác, hoặc cài extension (thư mục dist) vào tài khoản này.")
+                if st.button("🕷️ Crawl asset cả 5 sản phẩm", key=f"crawl_all_{run_dir.name}",
+                             help="Mở ĐỒNG THỜI 5 tab sản phẩm — extension tải song song, tab nào xong trước tool "
+                                  "chèn trước, xong tự đóng tab."):
+                    log = []
+                    with st.status(f"Đang mở {len(products_sel)} tab Shopee cùng lúc và chờ tải...",
+                                   expanded=True) as stt:
+                        since = time.time()
+                        open_many_crawl(products_sel)
+                        st.write(f"Đã mở {len(products_sel)} tab — chờ extension tải xong (tối đa 3 phút)...")
+
+                        def _got(p, folder):
+                            log.append(f"✅ TOP {p['rank']}: " + describe_crawl(import_crawl(folder, p, run_dir)))
+                            st.write(log[-1])
+
+                        _, missed = wait_many_crawl(products_sel, since, timeout=180, on_found=_got)
+                        for p in missed:
+                            log.append(f"❌ TOP {p['rank']}: quá 3 phút chưa thấy dữ liệu — bấm 🕷️ Crawl asset riêng "
+                                       "của Top đó (hoặc 📥 Nhập lại nếu tab đã tải xong)")
+                            st.write(log[-1])
+                        if missed:
+                            log.append("ℹ️ Đã tìm trong: " + " · ".join(f"`{r}`" for r in download_roots_crawl())
+                                       + ". Xem `chrome://downloads` file đã tải về đâu; khác chỗ thì đặt "
+                                       "SHOPEE_DOWNLOAD_DIR=<thư mục đó> trong .env. Tab nào KHÔNG tự đóng = extension "
+                                       "báo lỗi — bấm F12 → Console xem dòng [aff_crawl].")
+                            st.write(log[-1])
+                        stt.update(label=f"Crawl xong {len(products_sel) - len(missed)}/{len(products_sel)} sản phẩm",
+                                   state="complete" if not missed else "error")
+                    st.session_state["crawl_log"] = log
+                    st.rerun()
+                for line in st.session_state.pop("crawl_log", []):
+                    st.write(line)
+            # File .md thông tin sản phẩm (thông số, rating, lượt bán, mô tả) — Gemini viết lời bình theo dữ liệu thật.
+            render_bulk_md_upload(run_dir, products_sel)
+            for p in products_sel:
                 folder = run_dir / "product_media" / product_folder_name(p)
                 (folder / "main_images").mkdir(parents=True, exist_ok=True)
                 (folder / "description_images").mkdir(parents=True, exist_ok=True)
+                (folder / "variant_images").mkdir(parents=True, exist_ok=True)
                 current_images = list_all_product_images(p, run_dir)
                 current_videos = [v for v in folder.glob("*") if v.suffix.lower() in {".mp4", ".mov", ".webm", ".mkv", ".avi"}]
 
-                with st.expander(f"TOP {p['rank']}: {p['name']} — đã có {len(current_images)} ảnh, {len(current_videos)} video", expanded=False):
-                    st.markdown(f"[Mở link sản phẩm trên Shopee]({p['affiliate_link']})")
+                with st.expander(f"TOP {p['rank']}: {p['name']} — đã có {len(current_images)} ảnh, {len(current_videos)} video"
+                                 f" · {md_status(p, run_dir)}", expanded=False):
+                    lc1, lc2, lc3 = st.columns([2, 2, 3])
+                    lc1.link_button("🔗 Mở link sản phẩm trên Shopee", p["affiliate_link"])
+                    if lc2.button("🕷️ Crawl asset", key=f"crawl_{run_dir.name}_{p['rank']}",
+                                  help="Mở trang sản phẩm trong Chrome, extension Shopee Save tự tải hết rồi tool tự "
+                                       "chèn vào các ô bên dưới (thay ảnh / video cũ của sản phẩm này)."):
+                        since = time.time()
+                        with st.spinner("Đang mở Chrome và chờ extension tải xong (tối đa 2 phút)..."):
+                            open_crawl(p["affiliate_link"])
+                            found = wait_crawl(p["affiliate_link"], since, timeout=120)
+                        if found:
+                            st.session_state[f"crawl_msg_{p['rank']}"] = "✅ " + describe_crawl(
+                                import_crawl(found[0], p, run_dir))
+                        else:
+                            st.session_state[f"crawl_msg_{p['rank']}"] = (
+                                "❌ Quá 2 phút chưa thấy dữ liệu. Kiểm tra: Chrome là trình duyệt mặc định, đã cài lại "
+                                "extension Shopee Save bản mới, đã đăng nhập Shopee, Chrome KHÔNG bật 'Hỏi nơi lưu "
+                                f"từng tệp', thư mục tải là `{download_root()}`. Trang đã tải xong mà tool chưa nhận thì "
+                                "bấm 📥 Nhập lại.")
+                        st.rerun()
+                    if latest_crawl(p["affiliate_link"]) and lc3.button(
+                            "📥 Nhập lại bản crawl gần nhất", key=f"crawl_imp_{run_dir.name}_{p['rank']}"):
+                        st.session_state[f"crawl_msg_{p['rank']}"] = "✅ " + describe_crawl(
+                            import_crawl(latest_crawl(p["affiliate_link"])[0], p, run_dir))
+                        st.rerun()
+                    msg = st.session_state.pop(f"crawl_msg_{p['rank']}", None)
+                    if msg:
+                        (st.success if msg.startswith("✅") else st.error)(msg)
+                    render_product_md(p, run_dir)
+                    st.divider()
 
                     main_up = st.file_uploader(
                         "Ảnh chính (main_images)", type=["jpg", "jpeg", "png", "webp"],
                         accept_multiple_files=True, key=f"main_{p['rank']}",
                     )
+                    var_up = st.file_uploader(
+                        "Ảnh biến thể (variant_images — không bắt buộc)", type=["jpg", "jpeg", "png", "webp"],
+                        accept_multiple_files=True, key=f"var_{p['rank']}",
+                    )
                     desc_up = st.file_uploader(
-                        "Ảnh mô tả (description_images)", type=["jpg", "jpeg", "png", "webp"],
+                        "Ảnh mô tả (description_images — không bắt buộc)", type=["jpg", "jpeg", "png", "webp"],
                         accept_multiple_files=True, key=f"desc_{p['rank']}",
                     )
                     video_up = st.file_uploader(
@@ -290,6 +438,9 @@ with tab_media:
                         n = 0
                         for f in main_up or []:
                             (folder / "main_images" / f.name).write_bytes(f.getvalue())
+                            n += 1
+                        for f in var_up or []:
+                            (folder / "variant_images" / f.name).write_bytes(f.getvalue())
                             n += 1
                         for f in desc_up or []:
                             (folder / "description_images" / f.name).write_bytes(f.getvalue())
@@ -318,6 +469,16 @@ with tab_script:
         if not selection_data or not niche_data:
             st.warning("Run này chưa chọn sản phẩm.")
         else:
+            # Kịch bản theo MẪU KÊNH: tiêu đề + CSV từ khóa + sản phẩm tab 🖼️ -> 1 nút tạo nhiều kịch bản.
+            # Độ dài video mục tiêu -> số từ hook / sản phẩm / CTA (áp cho cả 2 cách viết bên dưới).
+            length_budget = render_length_target(run_dir, len(selection_data.get("selected_products", [])))
+            render_template_scripts(run_dir, selection_data, vision_client, client_err, length=length_budget)
+            st.divider()
+            st.markdown("### ✍️ Script mặc định (hook / lời bình bám ảnh / CTA) & Audio")
+            st.caption("Đã bấm 📌 Dùng cho Audio ở trên thì 04_script.txt bên dưới chính là kịch bản theo mẫu — "
+                       "KHÔNG cần bấm Viết script nữa, kéo xuống sinh audio luôn.")
+            # Từ khóa SEO + tiêu đề đã chọn ở tab 🔑 -> được chèn vào prompt hook / lời bình / CTA.
+            claims_ok = render_seo_input(run_dir, selection_data)
             col1, col2 = st.columns(2)
             gen_label = "🔁 Viết lại script" if flags["script"] else "✍️ Viết script (gọi Gemini)"
             if col1.button(gen_label, disabled=client_err is not None):
@@ -325,7 +486,8 @@ with tab_script:
                 with st.spinner("Đang viết lời bình từng sản phẩm bám ảnh thật (mỗi sản phẩm ~1 request Gemini)..."):
                     try:
                         script_result = run_script_stage(
-                            niche_data, selection_data, vision_client, text_client, media_dir=run_dir
+                            niche_data, selection_data, vision_client, text_client, media_dir=run_dir,
+                            claims_confirmed=claims_ok, length=length_budget,
                         )
                     except (LLMJSONError, LLMQuotaExceededError, LLMServerError) as e:
                         st.error(f"[LỖI] {e}")
@@ -340,12 +502,22 @@ with tab_script:
                 st.rerun()
 
             script_path = run_dir / "04_script.txt"
+            render_audio_source_notice(run_dir)
             if script_path.exists():
                 script_text = script_path.read_text(encoding="utf-8")
                 edited = st.text_area("04_script.txt (có thể sửa tay trước khi sinh audio)", script_text, height=400)
                 if col2.button("💾 Lưu chỉnh sửa script"):
                     script_path.write_text(edited, encoding="utf-8")
                     st.success("Đã lưu.")
+                try:
+                    _segs = parse_segments(edited)
+                    render_length_report(
+                        [({"hook": "Hook", "cta": "CTA"}.get(sg.kind) or f"SP: {(sg.product_name or '')[:40]}",
+                          sg.kind, sg.raw_text) for sg in _segs], length_budget)
+                except ValueError:
+                    pass
+                render_seo_coverage(run_dir, edited, selection_data, text_client, client_err, claims_ok,
+                                    regenerate_hook_cta)
 
                 flow_path = run_dir / "07_flow_prompts.md"
                 if flow_path.exists():
@@ -356,6 +528,7 @@ with tab_script:
                 if metadata:
                     with st.expander("05_metadata.json (tiêu đề/mô tả/tags gợi ý cho YouTube)"):
                         st.json(metadata)
+                    render_youtube_tags(metadata)
 
                 st.divider()
                 voice_source = st.radio(
@@ -379,9 +552,15 @@ with tab_script:
                         st.success("Đã sinh xong audio — sang tab 'Video' để ghép.")
                         st.rerun()
                 else:
-                    rec_script = recording_script(edited, selection_data)
+                    keep_tags = st.checkbox(
+                        "Giữ thẻ giọng đọc & hiệu ứng trong kịch bản thu âm ([Giọng trầm, nghiêm túc], "
+                        "[Sound Effect: Swoosh]…)", value=True, key=f"rec_tags_{run_dir.name}",
+                        help="Bật khi dùng giọng AI đọc được thẻ (ElevenLabs v3, Gemini…). Tắt khi tự đọc hoặc "
+                             "công cụ đọc nguyên văn cả chữ trong ngoặc.")
+                    rec_script = recording_script(edited, selection_data, keep_tags=keep_tags)
                     st.markdown(
-                        "**Bước 1** — tải kịch bản thu âm (đã bỏ thẻ cảm xúc và `[[IMG]]`). Ở Google Vids: mỗi đoạn "
+                        "**Bước 1** — tải kịch bản thu âm (đã bỏ `[[IMG]]` / `[Text on screen]`"
+                        + ("" if keep_tags else " và thẻ cảm xúc") + "). Ở Google Vids: mỗi đoạn "
                         "dán vào 1 cảnh → *Voiceover* → chọn giọng → tải video (mp4) về."
                     )
                     st.download_button("📄 Tải kịch bản thu âm (.txt)", rec_script,
@@ -404,13 +583,21 @@ with tab_script:
                             dest = upload_dir / up.name
                             dest.write_bytes(up.getvalue())
                             files.append(dest)
-                        with st.spinner("Đang nối audio, nghe lại bằng Whisper (Groq) để khớp từng câu với script..."):
-                            try:
-                                report = import_recorded_voice(edited, selection_data, run_dir, files,
-                                                               groq_client=text_client, text_client=text_client)
-                            except Exception as e:
-                                st.error(f"[LỖI] {type(e).__name__}: {e}")
-                                st.stop()
+                        bar = st.progress(0, text="Đang nối audio, nghe lại bằng Whisper (Groq) để khớp từng câu "
+                                                  "với script... (xem chi tiết ở cửa sổ PowerShell)")
+                        step_box = st.empty()
+
+                        def _voice_progress(pct, msg):
+                            bar.progress(min(max(int(pct), 0), 100), text=f"{pct}% — {msg}")
+                            step_box.caption(msg)
+
+                        try:
+                            report = import_recorded_voice(edited, selection_data, run_dir, files,
+                                                           groq_client=text_client, text_client=text_client,
+                                                           progress=_voice_progress)
+                        except Exception as e:
+                            st.error(f"[LỖI] {type(e).__name__}: {e} — chi tiết lỗi đã in ở cửa sổ PowerShell.")
+                            st.stop()
                         st.session_state["voice_report"] = {"run": run_dir.name, **report}
                         st.rerun()
                     report = st.session_state.get("voice_report")
@@ -427,6 +614,22 @@ with tab_script:
 
                 if flags["media"]:
                     st.success("Đã có audio (06_media_manifest.json) — sang tab 'Video' để ghép MP4.")
+                    try:
+                        _mf = json.loads((run_dir / "06_media_manifest.json").read_text(encoding="utf-8"))
+                        _bts = [b for s in _mf for b in s.get("beats") or []]
+                        _hl = sum(1 for b in _bts if (b.get("highlight") or "").strip())
+                    except Exception:
+                        _bts, _hl = [], 0
+                    if _bts:
+                        st.caption(f"Chữ nhấn mạnh: {_hl}/{len(_bts)} câu có chữ.")
+                    if st.button("✨ Sinh lại chữ nhấn mạnh (câu đang thiếu)", key=f"refill_hl_{run_dir.name}",
+                                 help="Không cần làm lại audio. Xong thì xuất lại CapCut / ghép lại video."):
+                        with st.spinner("Đang sinh chữ nhấn mạnh (Groq)..."):
+                            try:
+                                n, total = refill_highlights(run_dir, text_client)
+                                st.success(f"Xong: {n}/{total} câu có chữ nhấn mạnh — xuất lại CapCut để thấy.")
+                            except Exception as e:
+                                st.error(f"[LỖI] Sinh chữ nhấn mạnh thất bại: {type(e).__name__}: {e}")
                     audio_dir = run_dir / "audio"
                     if audio_dir.exists():
                         for f in sorted(p for p in audio_dir.glob("*.mp3") if not p.name.startswith("_")):
@@ -434,16 +637,36 @@ with tab_script:
                             st.audio(str(f))
 
                     st.divider()
-                    st.write("**📄 Mô tả YouTube** (tiêu đề, link sản phẩm, mốc thời gian, hashtag — tự ghép sau khi có audio)")
+                    st.write("**📄 Mô tả YouTube** (mô tả, link 5 sản phẩm, tóm tắt, chương, hashtag, đoạn SEO — tự ghép "
+                             "sau khi có audio)")
                     desc_path = run_dir / "08_youtube_description.txt"
+                    if (run_dir / "06_media_manifest.json").exists() and st.button(
+                            "🔁 Tạo lại mô tả YouTube", key=f"regen_desc_{run_dir.name}", disabled=client_err is not None,
+                            help="Groq viết lại phần chữ (mô tả, tóm tắt, tên chương, đoạn SEO, hashtag) từ dữ liệu thật; "
+                                 "mốc thời gian lấy từ audio hiện tại. Bản đang sửa tay sẽ bị thay."):
+                        from src.description import build_youtube_description
+                        with st.spinner("Groq đang viết mô tả..."):
+                            new_desc = build_youtube_description(run_dir, text_client)
+                        if new_desc:
+                            desc_path.write_text(new_desc, encoding="utf-8")
+                            st.rerun()
                     if desc_path.exists():
+                        desc_raw = desc_path.read_text(encoding="utf-8")
+                        if "───" not in desc_raw:
+                            st.warning("Mô tả này là bản định dạng CŨ — bấm **🔁 Tạo lại mô tả YouTube** ở trên để ra "
+                                       "đúng format mới (mô tả, link Top 1→5, tóm tắt, chương, hashtag, đoạn SEO).")
                         desc_text = st.text_area(
                             "08_youtube_description.txt (dán trực tiếp vào ô mô tả video khi đăng YouTube)",
-                            desc_path.read_text(encoding="utf-8"), height=350, key="youtube_desc",
+                            desc_raw, height=450,
+                            # key đổi theo lần sửa file -> ô luôn hiện đúng nội dung file mới nhất
+                            key=f"youtube_desc_{run_dir.name}_{int(desc_path.stat().st_mtime)}",
                         )
                         if st.button("💾 Lưu chỉnh sửa mô tả"):
                             desc_path.write_text(desc_text, encoding="utf-8")
                             st.success("Đã lưu.")
+                        st.markdown("**📋 Bấm biểu tượng copy ở góc phải khung dưới** để copy cả mô tả, dán thẳng vào "
+                                    "YouTube Studio:")
+                        st.code(desc_text, language=None, wrap_lines=True, height=300)
                         st.caption(
                             "⚠️ Link trong mô tả lấy từ 03_products_selected.json — nhớ đổi sang link đã gắn tag "
                             "affiliate (Shopee Affiliate Portal) trước khi đăng thật, nếu không sẽ không nhận hoa hồng."
@@ -526,24 +749,94 @@ with tab_video:
                     with st.expander(f"Bộ phong cách '{style_choice}' gồm"):
                         for line in describe_style(chosen_style):
                             st.markdown(f"- {line}")
+                # Chuyển động ảnh: Kiểu 1 = keyframe Ken Burns mọi ảnh; Kiểu 2 = Combo có sẵn của CapCut cho 90% ảnh
+                # + keyframe trượt/phóng vào vùng điểm nhấn cho ảnh quan trọng (src/capcut_motion.py).
+                motion_mode = st.radio(
+                    "🎞️ Chuyển động ảnh",
+                    ["Kiểu 1 — Keyframe Ken Burns (zoom + trượt mượt cho mọi ảnh)",
+                     "Kiểu 2 — Combo Animation 90% + Keyframe điểm nhấn 10%"],
+                    key=f"motion_mode_{run_dir.name}",
+                    help="Kiểu 2: ảnh thường dùng hiệu ứng Combo có sẵn của CapCut (Zoom 1, Zoom 2, Pendulum...) — nhanh, "
+                         "nhịp dồn dập; ảnh đầu phần mở đầu + ảnh đầu mỗi Top dùng keyframe trượt vào đúng vùng bạn chọn.",
+                )
+                motion = None
+                if motion_mode.startswith("Kiểu 2"):
+                    selection_data_v = load_json(run_dir / "03_products_selected.json") or {}
+                    combo_lib = load_combo_library()
+                    if not combo_lib:
+                        st.warning("Chưa có hiệu ứng Combo nào — học từ CapCut ở mục **🎞️ Học hiệu ứng Combo** cuối trang "
+                                   "(làm 1 lần). Chưa học thì ảnh thường dùng Combo GIẢ LẬP bằng keyframe (Zoom nhịp / Phóng nhanh / "
+                                   "Lắc nhẹ / Thu nhỏ dần) — vẫn có chuyển động, chỉ không phải hiệu ứng gốc của CapCut.")
+                    names = [c["name"] for c in combo_lib]
+                    picked = st.multiselect("Hiệu ứng Combo dùng luân phiên cho ảnh thường", names, default=names,
+                                            key=f"combo_pick_{run_dir.name}")
+                    with st.expander("🎯 Ảnh điểm nhấn (keyframe) — chọn vùng camera trượt vào", expanded=False):
+                        st.caption("Ảnh điểm nhấn = ảnh ĐẦU TIÊN của phần mở đầu và của mỗi Top (~10% số ảnh). Chọn vùng "
+                                   "có thông tin muốn nhấn (vd giá tiền ở góc dưới phải) — camera phóng to dần vào đó.")
+                        focus_opts = list(COMBO_FOCUS_POINTS)
+                        focus = {"hook": st.selectbox("Mở đầu", focus_opts, key=f"focus_hook_{run_dir.name}")}
+                        cols_f = st.columns(3)
+                        for i_p, p_sel in enumerate(sorted(selection_data_v.get("selected_products", []),
+                                                           key=lambda x: x.get("rank") or 0)):
+                            focus[p_sel.get("rank")] = cols_f[i_p % 3].selectbox(
+                                f"Top {p_sel.get('rank')}", focus_opts, key=f"focus_{run_dir.name}_{p_sel.get('rank')}")
+                        key_zoom = st.slider("Mức phóng ảnh điểm nhấn", 1.10, 1.50, 1.25, 0.05,
+                                             key=f"key_zoom_{run_dir.name}")
+                    motion = {"mode": "combo", "combos": [c for c in combo_lib if c["name"] in picked],
+                              "focus": focus, "zoom": key_zoom}
+                sfx_track = st.checkbox(
+                    "🔊 Thêm track hiệu ứng âm thanh theo thẻ [Sound Effect] của kịch bản",
+                    value=capcut_recorded_voice(run_dir), key=f"sfx_track_{run_dir.name}",
+                    help="Bật sẵn khi dùng GIỌNG TỰ THU (giọng thu không có SFX). Giọng máy edge-tts đã chèn SFX trong "
+                         "audio rồi — bật nữa sẽ bị kêu 2 lần. SFX nằm trên 1 track riêng, chỉnh / xoá từng tiếng dễ.",
+                )
+                from src.cue_sfx import CUE_LABELS
+                cue_pick = st.multiselect(
+                    "🖱️ Tiếng theo lời thoại (tự dò, không cần thẻ)", list(CUE_LABELS), default=list(CUE_LABELS),
+                    format_func=CUE_LABELS.get, key=f"cue_sfx_{run_dir.name}",
+                    help="Mouse click lúc giọng bảo bấm link · Woosh đầu mỗi Top · Drop coin lúc hô giá. Nằm trên 1 "
+                         "track âm thanh riêng. Muốn đổi tiếng: thả file mouse_click.mp3 / woosh.mp3 / coin.mp3 "
+                         "vào assets/sfx/.",
+                )
+                vf1, vf2 = st.columns([2, 1])
+                video_first_on = vf1.checkbox(
+                    "🎬 Ưu tiên video sản phẩm (mở đầu / kết = montage video, mỗi Top dùng video trước rồi mới tới ảnh)",
+                    value=True, key=f"video_first_{run_dir.name}",
+                    help="Tắt = cách cũ: ảnh là chính, video chỉ thay đúng 1 câu dài nhất mỗi Top.")
+                video_ratio = vf2.slider("Tỉ lệ video tối đa mỗi Top", 0.3, 1.0, 0.85, 0.05,
+                                         key=f"video_ratio_{run_dir.name}", disabled=not video_first_on,
+                                         help="Phần còn lại của mỗi Top dùng ảnh (đổi ảnh ≤ 6 giây / ảnh).")
                 use_akp = st.checkbox(
                     "✨ Làm đẹp bằng Auto Keyframe Pro", value=True,
                     help="Add-on của Tool AutoCapcut V6.3: keyframe có gia tốc (ease), lớp nền mờ + Canvas Blur, "
                          "video dọc để vừa khung. Tự backup, chạy lại không chồng lớp.",
                 )
                 akp_opts = {}
+                # Bộ phong cách học từ video mẫu có ghi cách làm Auto Keyframe Pro (số keyframe, zoom, độ đậm nền)
+                # -> dùng luôn làm mặc định để video mới giống bản mẫu.
+                akp_base = {**AKP_DEFAULTS, **((chosen_style or {}).get("akp") or {})}
+                if use_akp:
+                    akp_opts.update({k: akp_base[k] for k in ("points", "zoom", "bg_alpha") if k in akp_base})
+                if use_akp and motion:
+                    akp_opts["style"] = "Không Sử Dụng"   # mặc định khi chưa mở tuỳ chọn
                 if use_akp:
                     with st.expander("Tuỳ chọn Auto Keyframe Pro"):
                         c1, c2 = st.columns(2)
-                        akp_opts["style"] = c1.selectbox(
-                            "Kiểu chuyển động", AKP_KEYFRAME_STYLES,
-                            index=AKP_KEYFRAME_STYLES.index(AKP_DEFAULTS["style"]),
-                        )
+                        if motion:
+                            # Kiểu 2 đã tự lo chuyển động ảnh — AKP chỉ làm lớp nền mờ / canvas blur / video,
+                            # KHÔNG ghi đè keyframe (nếu không sẽ xoá Combo + keyframe điểm nhấn).
+                            akp_opts["style"] = "Không Sử Dụng"
+                            c1.caption("Kiểu chuyển động: theo Kiểu 2 (AKP không ghi đè)")
+                        else:
+                            akp_opts["style"] = c1.selectbox(
+                                "Kiểu chuyển động", AKP_KEYFRAME_STYLES,
+                                index=AKP_KEYFRAME_STYLES.index(AKP_DEFAULTS["style"]),
+                            )
                         akp_opts["bg_blur"] = c2.selectbox(
                             "Độ mờ lớp nền", AKP_BLUR_LEVELS, index=AKP_BLUR_LEVELS.index(AKP_DEFAULTS["bg_blur"]),
                         )
-                        akp_opts["zoom"] = c1.slider("Mức zoom", 1.02, 1.30, float(AKP_DEFAULTS["zoom"]), 0.01)
-                        akp_opts["bg_alpha"] = c2.slider("Độ đậm lớp nền", 0.10, 1.00, float(AKP_DEFAULTS["bg_alpha"]), 0.05)
+                        akp_opts["zoom"] = c1.slider("Mức zoom", 1.02, 1.30, float(akp_base["zoom"]), 0.01)
+                        akp_opts["bg_alpha"] = c2.slider("Độ đậm lớp nền", 0.10, 1.00, float(akp_base["bg_alpha"]), 0.05)
                         akp_opts["keyword_subs"] = st.checkbox(
                             "Phụ đề TỪ KHOÁ thay phụ đề nguyên câu",
                             help="Mỗi clip ảnh chỉ hiện 1 cụm từ khoá (số liệu, mã máy, danh từ chính). "
@@ -575,7 +868,10 @@ with tab_video:
                     with st.spinner("Đang tạo project CapCut..."):
                         try:
                             draft_dir = export_capcut_draft(run_dir, canvas=canvas,
-                                                            draft_name=capcut_name.strip() or None, style=export_style)
+                                                            draft_name=capcut_name.strip() or None, style=export_style,
+                                                            motion=motion, sfx=sfx_track, cue_sfx=set(cue_pick),
+                                                            video_first={"enabled": video_first_on,
+                                                                         "max_ratio": float(video_ratio)})
                             akp_log = []
                             if use_akp:
                                 enhance_draft(draft_dir, akp_opts, log=akp_log.append)
@@ -629,6 +925,43 @@ with tab_video:
                 )
 
             st.divider()
+
+            with st.expander("🎞️ Học hiệu ứng Combo từ CapCut (cho Kiểu 2 — làm 1 lần)"):
+                st.info("Mục này CHỈ học hiệu ứng Combo (Animation) cho Kiểu 2. Muốn tool học CẢ phong cách của 1 video "
+                        "mẫu (chữ nhấn mạnh, badge, chuyển cảnh, nền mờ, keyframe) → dùng mục **➕ Lưu phong cách mới** "
+                        "ngay bên dưới.")
+                st.caption(
+                    "1) Mở CapCut, tạo project mới, kéo vào vài ảnh. 2) Chọn từng ảnh → Animation (Hoạt ảnh) → Combo, "
+                    "gắn mỗi ảnh 1 hiệu ứng bạn thích (Zoom 1, Zoom 2, Pendulum...). 3) Thoát về màn hình chính "
+                    "CapCut (để CapCut lưu), rồi chọn project đó ở đây. Tool chép đúng hiệu ứng CapCut đã tải trên máy bạn."
+                )
+                lib_now = load_combo_library()
+                if lib_now:
+                    st.caption("Đã học: " + ", ".join(f"{c['name']} ({c.get('type') or '?'})" for c in lib_now))
+                drafts_root_c = default_drafts_root()
+                drafts_c = sorted(
+                    (p for p in drafts_root_c.iterdir() if (p / "draft_content.json").exists()),
+                    key=lambda p: p.stat().st_mtime, reverse=True,
+                ) if drafts_root_c else []
+                combo_src = st.selectbox("Project có gắn Combo", [p.name for p in drafts_c], key="combo_src")
+                cc1, cc2 = st.columns(2)
+                if cc1.button("📥 Học hiệu ứng", disabled=not combo_src):
+                    try:
+                        content_c = json.loads((drafts_root_c / combo_src / "draft_content.json").read_text(encoding="utf-8"))
+                        found = learn_combos(content_c)
+                        if not found:
+                            st.error("Project này chưa có clip ảnh nào gắn Animation (Combo) nên không có gì để học ở đây. "
+                                     "Nếu đây là video mẫu bạn muốn tool làm theo (chữ, chuyển cảnh, nền, keyframe) → "
+                                     "mở mục **➕ Lưu phong cách mới** bên dưới, chọn project này rồi bấm 💾 Lưu phong cách.")
+                        else:
+                            lib_now = save_combo_library(found)
+                            st.success(f"Đã học {len(found)} hiệu ứng: " + ", ".join(c["name"] for c in found)
+                                       + f" — thư viện có {len(lib_now)} hiệu ứng.")
+                    except Exception as e:
+                        st.error(f"[LỖI] Không đọc được project: {type(e).__name__}: {e}")
+                if lib_now and cc2.button("🗑️ Xoá thư viện Combo"):
+                    save_combo_library([], merge=False)
+                    st.rerun()
 
             with st.expander("➕ Lưu phong cách mới từ 1 project CapCut đã chỉnh tay"):
                 st.caption(

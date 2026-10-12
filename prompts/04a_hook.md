@@ -5,6 +5,7 @@ Ngách (JSON):
 cao cấp nhất; video đếm ngược từ Top 5 lên Top 1):
 {{SELECTED_PRODUCTS_JSON}}
 
+{{TITLE_BLOCK}}{{SEO_BLOCK}}
 Nhiệm vụ: Viết đoạn HOOK mở đầu video (voice-over), khoảng 3-5 câu, tạo tò mò và giữ chân người
 xem, giới thiệu sẽ đếm ngược Top 5 sản phẩm trong ngách trên, đi từ mẫu bình dân lên tới mẫu cao
 cấp — ngân sách nào cũng có lựa chọn — và Top 1 ở cuối video là mẫu đáp ứng trọn vẹn mọi nhu cầu.

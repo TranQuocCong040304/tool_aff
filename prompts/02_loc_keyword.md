@@ -14,5 +14,7 @@ Chỉ trả về JSON đúng theo format sau, không thêm giải thích ngoài 
   ]
 }
 
-Quy tắc: score từ 0-10 theo mức độ phù hợp với ngách. Chỉ giữ lại tối đa 15 từ khóa có score >= 6,
+Quy tắc: CHỈ chọn từ khóa CÓ TRONG danh sách ở trên và giữ NGUYÊN VĂN từng chữ — TUYỆT ĐỐI không tự
+ghép / sáng tác từ khóa mới (hệ thống sẽ tự loại mọi từ khóa không có trong danh sách).
+score từ 0-10 theo mức độ phù hợp với ngách. Chỉ giữ lại tối đa 15 từ khóa có score >= 6,
 sắp xếp giảm dần theo score.

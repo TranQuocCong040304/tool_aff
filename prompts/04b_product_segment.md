@@ -4,6 +4,7 @@ Ngách (JSON):
 Sản phẩm cần viết lời bình (JSON):
 {{PRODUCT_JSON}}
 
+{{PRODUCT_INFO}}
 Bảng xếp hạng đầy đủ của video — bậc thang giá từ BÌNH DÂN (Top 5) lên CAO CẤP (Top 1), video
 đếm ngược Top 5 -> Top 1, hạng càng cao càng xịn và càng đắt:
 {{RANKING_JSON}}
@@ -27,6 +28,8 @@ ngắn, màu hơi kén nội thất...), nếu không thấy gì thì dùng "nit
 - Lời chê nhẹ này KHÁC với "điểm còn thiếu so với hạng trên" ở hạng 5-2 — hai ý tách bạch.
 
 Nhiệm vụ: Viết đoạn lời bình (voice-over) giới thiệu RIÊNG sản phẩm này.
+
+{{SEO_BLOCK}}
 
 {{IMAGE_INSTRUCTION}}
 

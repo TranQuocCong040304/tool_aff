@@ -4,7 +4,8 @@ Ngách (JSON):
 Từ khóa đã lọc (JSON):
 {{FILTERED_KEYWORDS_JSON}}
 
-Danh sách sản phẩm Shopee thu thập được (JSON):
+Danh sách sản phẩm Shopee thu thập được (JSON rút gọn — "id" là mã sản phẩm, "price" tính bằng đồng,
+"sold" là lượt bán):
 {{PRODUCTS_JSON}}
 
 Nhiệm vụ: Chọn ra ĐÚNG 5 sản phẩm cho video review "Top 5", xếp thành một BẬC THANG GIÁ từ
@@ -23,7 +24,14 @@ an toàn, dễ vệ sinh, màn hình/điều khiển, độ bền thương hiệ
 
 Bước 2 — Đọc kỹ tên từng sản phẩm (tên Shopee thường chứa thông số — dung tích, công suất, pin
 mAh, chuẩn kết nối...) và rating/lượt bán, rồi chọn 5 sản phẩm trải đều các phân khúc giá
-(tránh 5 sản phẩm cùng một tầm giá). Ưu tiên sản phẩm có rating/lượt bán đáng tin ở mỗi phân khúc.
+(tránh 5 sản phẩm cùng một tầm giá).
+ƯU TIÊN SỐ 1 khi chọn trong mỗi phân khúc: sản phẩm có LƯỢT BÁN ("sold") CAO NHẤT, RATING CAO (≥ 4.5 càng tốt)
+và NHIỀU LƯỢT ĐÁNH GIÁ ("reviews", nếu có). Giữa 2 sản phẩm cùng tầm giá, LUÔN chọn sản phẩm bán chạy hơn.
+Sản phẩm không có "sold" hoặc chỉ vài lượt bán chỉ được chọn khi phân khúc đó không còn sản phẩm nào khác.
+
+TUYỆT ĐỐI KHÔNG CHỌN TRÙNG: 5 sản phẩm phải là 5 MẪU KHÁC NHAU — không chọn 2 tin cùng mã model, cùng 1 sản phẩm
+đăng ở 2 shop, hoặc 2 tin tên gần giống nhau cùng hãng + cùng công suất / dung tích (vd "Bếp Từ Cảm Ứng SUNHOUSE
+2200W" và "[TẶNG NỒI] Bếp Từ Cảm Ứng SUN HOUSE 2200W" là CÙNG 1 mẫu). Mỗi "id" chỉ xuất hiện 1 lần.
 
 Bước 3 — Với mỗi sản phẩm, ghi rõ nó đáp ứng nhu cầu nào ("needs_met") và còn thiếu nhu cầu nào
 ("needs_missing") trong danh sách ở Bước 1. Kiểm tra lại toàn bộ bậc thang:
@@ -45,17 +53,17 @@ Với mỗi sản phẩm:
   ngắn, hướng dẫn chưa có tiếng Việt, hơi chiếm chỗ...). BẮT BUỘC có cho CẢ 5 sản phẩm, kể cả Top 1.
   KHÔNG chê lỗi nghiêm trọng (hỏng hóc, kém an toàn, lừa đảo...).
 
+Mỗi sản phẩm chọn ghi đúng "id" của nó trong danh sách trên (KHÔNG cần chép lại tên, giá hay link — hệ
+thống tự điền). Viết các câu "reason_selected", "weakness", "nitpick" ngắn gọn.
+
 Chỉ trả về JSON đúng theo format sau, không thêm giải thích ngoài JSON:
 {
   "buyer_needs": ["...", "..."],
   "selected_products": [
     {
       "rank": 1,
+      "id": 0,
       "tier": "cao cấp",
-      "name": "...",
-      "price": 0,
-      "image_url": "...",
-      "affiliate_link": "...",
       "needs_met": ["..."],
       "needs_missing": [],
       "scores": {"tinh_nang": 0, "danh_gia": 0, "gia_tri": 0, "lien_quan": 0},
