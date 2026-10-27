@@ -367,3 +367,4 @@ Các prompt nằm trong `prompts/*.md`, dùng cú pháp `{{PLACEHOLDER}}` — s�
 | `src/seo_ui.py` | Giao diện tab "Từ khóa & Tiêu đề SEO" |
 | `src/vidiq_client.py` | Client MCP (Streamable HTTP) gọi vidIQ: chấm điểm, gợi ý tiêu đề, xem credit |
 | `src/vidiq_flow.py` | Quy trình 6 bước chấm/viết lại tiêu đề bằng vidIQ, trần credit + cache |
+# video_auto
